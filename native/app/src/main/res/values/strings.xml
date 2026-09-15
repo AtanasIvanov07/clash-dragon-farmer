@@ -1,0 +1,12 @@
+<resources>
+    <string name="accessibility_summary">Read the game screen and perform your calibrated taps</string>
+    <string name="accessibility_description">Dragon Farmer uses Accessibility to capture Clash of Clans, recognize buttons and resource amounts, and perform your configured taps. Android grants broad screen/control access; this app restricts automation to Clash of Clans. Screenshots and settings stay in this app’s private storage. The APK has no internet permission. Tap STOP, press Volume Down, or disable this service to stop. Gameplay automation can result in an account ban.</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#247B62</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">#F5F4EF</item>
+        <item name="android:navigationBarColor">#F5F4EF</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,22 @@
+DRAGON FARMER — STANDALONE S25 APP
+
+1. Install Dragon-Farmer.apk on your phone.
+2. Open it and enable Dragon Farmer Accessibility.
+3. Clash: English, landscape, dragons ready, one free builder.
+4. Follow Capture game screens, then set your actual dragon count.
+5. Check recognition -> Test one attack + wall check -> Start farming session.
+
+STOP or Volume Down ends the session. Keep Clash open and the phone unlocked.
+No AutoJs6, root, or connected PC needed.
+
+Version 0.3: calibration includes a static village landmark and dragon quantity.
+Updating from 0.2? Recapture Home village and Opponent scouting.
+Keep the floating control away from game buttons and deployment points.
+Test STOP and Volume Down during the supervised trial.
+
+Accessibility blocked? Settings -> Apps -> Dragon Farmer -> three-dot menu
+-> Allow restricted settings. Then enable Accessibility.
+
+Device-test build: not yet verified in live Clash on your S25.
+Game automation can cause an account ban. Accessibility is a broad permission.
+The APK itself has no Internet permission.

@@ -1,0 +1,7 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'dev.s25.testscene'
+    compileSdk 35
+    defaultConfig { applicationId 'dev.s25.testscene'; minSdk 34; targetSdk 35; versionCode 1; versionName 'fixture-only' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}

@@ -1,0 +1,9 @@
+
+dev.s25.farmer.CountOcrTest:..
+dev.s25.farmer.DeviceSmokeTest:......
+dev.s25.farmer.NativeLoopTest:.
+
+Time: 102.373
+
+OK (9 tests)
+

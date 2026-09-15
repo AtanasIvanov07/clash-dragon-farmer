@@ -1,0 +1,29 @@
+# Local dependencies and build output
+.toolchain/
+.reference/
+dist/
+phone-data/
+node_modules/
+native/.gradle/
+native/local.properties
+native/**/build/
+
+# Private APK signing material
+native/signing/
+*.jks
+*.keystore
+
+# Local/internal project history and the superseded AutoJs prototype
+PROJECT_NOTES.md
+main.js
+lib/
+tests/
+DETAILED-GUIDE.md
+package.json
+
+# Editor and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
