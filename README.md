@@ -13,7 +13,7 @@ The final automated run passed 27 JVM tests and 9 Android tests, including two s
 
 ## Install
 
-1. Download `Dragon-Farmer.apk` from the repository's latest GitHub Release.
+1. Download `Dragon-Farmer.apk` from the [v0.3.0 device-test release](https://github.com/AtanasIvanov07/clash-dragon-farmer/releases/tag/v0.3.0).
 2. Install it, open Dragon Farmer, and enable its Accessibility service.
 3. Set Clash to English and landscape. Prepare dragons and leave one builder free.
 4. Follow **Capture game screens**, then enter your actual dragon count.
