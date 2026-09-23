@@ -2,6 +2,7 @@ package dev.s25.farmer;
 
 import android.accessibilityservice.*;
 import android.content.*;
+import android.content.res.Configuration;
 import android.graphics.*;
 import android.hardware.HardwareBuffer;
 import android.os.*;
@@ -12,6 +13,7 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class MacroService extends AccessibilityService {
     private static volatile java.lang.ref.WeakReference<MacroService> current = new java.lang.ref.WeakReference<>(null);
@@ -27,6 +29,8 @@ public final class MacroService extends AccessibilityService {
     private Future<?> job;
     private WindowManager windows;
     private View overlay;
+    private WindowManager.LayoutParams controlLayout;
+    private int controlX = -1, controlY = -1, controlWidth;
     private TextView statusView;
     private Store store;
     private volatile boolean stopped, busy;
@@ -40,6 +44,10 @@ public final class MacroService extends AccessibilityService {
         try { store = new Store(this); } catch (Exception e) { status = "Cannot open settings: " + e.getMessage(); }
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
+    @Override public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        main.post(this::clampControl);
+    }
     @Override public void onInterrupt() { if (busy()) stopWork("Accessibility interrupted"); }
     @Override protected boolean onKeyEvent(KeyEvent event) {
         if ((busy() || volumeDownHeld) && event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN) {
@@ -157,10 +165,7 @@ public final class MacroService extends AccessibilityService {
             @Override public void onFailure(int code) { result.completeExceptionally(new IOException("Android screenshot failed (code " + code + ").")); }
         });
         } catch (Exception e) { result.completeExceptionally(e); } });
-        Frame frame;
-        try { frame = result.get(5, TimeUnit.SECONDS); }
-        catch (TimeoutException e) { result.cancel(false); throw new IOException("Android screenshot callback timed out.", e); }
-        catch (Exception e) { result.cancel(false); throw e; }
+        Frame frame = awaitCapture(result);
         try {
             check(); Target after = target();
             if (after.id != t.id || !after.bounds.equals(t.bounds)) throw new IOException("Game window changed during capture.");
@@ -173,6 +178,16 @@ public final class MacroService extends AccessibilityService {
             }
             return frame;
         } catch (Exception e) { frame.close(); throw e; }
+    }
+    static Frame awaitCapture(CompletableFuture<Frame> result) throws Exception {
+        try { return result.get(5, TimeUnit.SECONDS); }
+        catch (Exception e) {
+            // Completion can win the race with interruption/timeout. In that case
+            // the callback transferred ownership, but this worker never received it.
+            if (!result.cancel(false)) result.thenAccept(Frame::close);
+            if (e instanceof TimeoutException) throw new IOException("Android screenshot callback timed out.", e);
+            throw e;
+        }
     }
     private void gesture(GestureDescription gesture) throws Exception {
         check(); Target t = target();
@@ -274,7 +289,8 @@ public final class MacroService extends AccessibilityService {
                                 report.append(field.key).append(vision.match(f, field.key) == null ? ": not visible\n" : ": MATCH\n");
                             } else if (field.kind.equals("region") && store.rectangle("regions", field.key) != null) {
                                 String value = vision.read(f, field.key);
-                                report.append(field.key).append(": ").append(value).append(" → ").append(Rules.number(value)).append('\n');
+                                Number parsed = field.key.equals("dragon_count") ? (Number) Rules.troopCount(value) : Rules.number(value);
+                                report.append(field.key).append(": ").append(value).append(" → ").append(parsed).append('\n');
                             }
                         }
                         report.append("Selected wall level: ").append(vision.wall(f));
@@ -409,27 +425,47 @@ public final class MacroService extends AccessibilityService {
         statusView = new TextView(this); statusView.setTextColor(Color.WHITE); statusView.setTextSize(11); statusView.setText(status);
         // Reserve button space even when this overlay is first measured in portrait.
         row.addView(statusView, new LinearLayout.LayoutParams(0, -2, 1));
-        if (action != null) { Button start = new Button(this); start.setText(action); start.setSingleLine(); start.setTextSize(12); start.setPadding(dp(6), 0, dp(6), 0); start.setOnClickListener(v -> callback.run()); row.addView(start, new LinearLayout.LayoutParams(dp(88), dp(48))); }
+        if (action != null) {
+            Button start = new Button(this); start.setText(action); start.setSingleLine(); start.setTextSize(12); start.setPadding(dp(6), 0, dp(6), 0);
+            AtomicBoolean clicked = new AtomicBoolean();
+            start.setOnClickListener(v -> { if (clicked.compareAndSet(false, true)) callback.run(); });
+            row.addView(start, new LinearLayout.LayoutParams(dp(88), dp(48)));
+        }
         Button stop = new Button(this); stop.setText("STOP"); stop.setSingleLine(); stop.setTextSize(12); stop.setPadding(dp(6), 0, dp(6), 0); stop.setOnClickListener(v -> stopWork("Stopped by user")); row.addView(stop, new LinearLayout.LayoutParams(dp(64), dp(48)));
         WindowManager.LayoutParams p = params(false);
-        p.width = Math.min(dp(action == null ? 256 : 344), windows.getCurrentWindowMetrics().getBounds().width() - dp(16));
+        controlWidth = dp(action == null ? 256 : 344);
+        p.width = Math.min(controlWidth, windows.getCurrentWindowMetrics().getBounds().width() - dp(16));
+        if (controlX >= 0) { p.x = controlX; p.y = controlY; }
         final float[] drag = new float[4];
         statusView.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) { drag[0] = e.getRawX(); drag[1] = e.getRawY(); drag[2] = p.x; drag[3] = p.y; }
             else if (e.getAction() == MotionEvent.ACTION_MOVE) {
-                Rect bounds = windows.getCurrentWindowMetrics().getBounds();
-                p.x = Math.max(0, Math.min(Math.max(0, bounds.width() - row.getWidth()), (int)(drag[2] + e.getRawX() - drag[0])));
-                p.y = Math.max(0, Math.min(Math.max(0, bounds.height() - row.getHeight()), (int)(drag[3] + e.getRawY() - drag[1])));
-                windows.updateViewLayout(row, p);
+                p.x = (int)(drag[2] + e.getRawX() - drag[0]);
+                p.y = (int)(drag[3] + e.getRawY() - drag[1]);
+                clampControl();
             }
             else if (e.getAction() == MotionEvent.ACTION_UP) v.performClick();
             return true;
         });
-        overlay = row; windows.addView(row, p);
+        overlay = row; controlLayout = p; windows.addView(row, p);
+        row.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> clampControl());
+        row.post(this::clampControl);
+    }
+    private void clampControl() {
+        if (overlay == null || controlLayout == null || !overlay.isAttachedToWindow()) return;
+        Rect bounds = windows.getCurrentWindowMetrics().getBounds();
+        int width = Math.min(controlWidth, Math.max(1, bounds.width() - dp(16)));
+        int x = Math.max(0, Math.min(Math.max(0, bounds.width() - width), controlLayout.x));
+        int height = Math.max(dp(54), overlay.getHeight());
+        int y = Math.max(0, Math.min(Math.max(0, bounds.height() - height), controlLayout.y));
+        boolean changed = controlLayout.width != width || controlLayout.x != x || controlLayout.y != y;
+        controlLayout.width = width; controlLayout.x = x; controlLayout.y = y;
+        controlX = x; controlY = y;
+        if (changed) windows.updateViewLayout(overlay, controlLayout);
     }
     private void removeOverlay() {
         if (overlay != null) { try { windows.removeViewImmediate(overlay); } catch (Exception ignored) {} overlay = null; }
-        statusView = null;
+        statusView = null; controlLayout = null;
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     private void toast(String text) { main.post(() -> Toast.makeText(this, text, Toast.LENGTH_LONG).show()); }

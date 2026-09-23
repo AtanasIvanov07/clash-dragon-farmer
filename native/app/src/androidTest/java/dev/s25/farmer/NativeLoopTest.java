@@ -3,12 +3,16 @@ package dev.s25.farmer;
 import android.app.UiAutomation;
 import android.content.*;
 import android.os.SystemClock;
+import android.view.*;
 import android.view.accessibility.*;
+import android.widget.*;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.util.*;
 import static org.junit.Assert.*;
 
@@ -35,7 +39,32 @@ public class NativeLoopTest {
     private void scene(Context context,String scene,String resource,boolean reset) throws Exception {
         Intent i=new Intent().setClassName("dev.s25.testscene","dev.s25.testscene.SceneActivity")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("scene",scene).putExtra("resource",resource).putExtra("reset",reset);
-        context.startActivity(i); Thread.sleep(1300);
+        context.startActivity(i);
+        long until = SystemClock.elapsedRealtime() + 10000;
+        String foreground = "no active window";
+        while (SystemClock.elapsedRealtime() < until) {
+            MacroService service = MacroService.getInstance();
+            AccessibilityNodeInfo root = service == null ? null : service.getRootInActiveWindow();
+            if (root != null) {
+                foreground = String.valueOf(root.getPackageName());
+                root.recycle();
+                if (foreground.equals("dev.s25.testscene")) {
+                    Thread.sleep(250);
+                    return;
+                }
+            }
+            Thread.sleep(100);
+        }
+        fail("Synthetic scene did not become the active window; foreground=" + foreground);
+    }
+    private LinearLayout control(MacroService service) throws Exception {
+        Field field = MacroService.class.getDeclaredField("overlay"); field.setAccessible(true);
+        return (LinearLayout) field.get(service);
+    }
+    private long starts(Store store) throws Exception {
+        java.io.File log = new java.io.File(store.directory, "session.jsonl");
+        if (!log.exists()) return 0;
+        try (var lines = Files.lines(log.toPath())) { return lines.filter(s -> s.contains("\"session-start\"")).count(); }
     }
     @Test public void realAndroidLoopOnSyntheticScene() throws Exception {
         var instrumentation=InstrumentationRegistry.getInstrumentation();
@@ -77,6 +106,23 @@ public class NativeLoopTest {
         scene(context,"home","gold",true);
         instrumentation.runOnMainSync(()->service.prepare(MacroService.FARM));
         Thread.sleep(1500);
+        LinearLayout readyControl = control(service);
+        Button originalStart = (Button) readyControl.getChildAt(1);
+        // Use the drag listener to put the control away from game actions. START
+        // must retain that placement, including when stale click events arrive.
+        instrumentation.runOnMainSync(() -> {
+            View handle = readyControl.getChildAt(0);
+            long time = SystemClock.uptimeMillis();
+            for (int action : new int[]{MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP}) {
+                MotionEvent event = MotionEvent.obtain(time, time + 10, action,
+                        action == MotionEvent.ACTION_DOWN ? 10 : 10 + store.width() / 3f, 10, 0);
+                handle.dispatchTouchEvent(event); event.recycle();
+            }
+        });
+        WindowManager.LayoutParams placed = (WindowManager.LayoutParams) readyControl.getLayoutParams();
+        int placedX = placed.x, placedY = placed.y;
+        assertTrue("Control did not move", placedX > store.width() / 4);
+        long startsBefore = starts(store);
         boolean clicked=false;
         for(AccessibilityWindowInfo window:automation.getWindows()) {
             AccessibilityNodeInfo root=window.getRoot();if(root==null)continue;
@@ -86,10 +132,15 @@ public class NativeLoopTest {
             if(clicked)break;
         }
         assertTrue("Floating START control was not clickable",clicked);
+        instrumentation.runOnMainSync(() -> { originalStart.performClick(); originalStart.performClick(); });
+        WindowManager.LayoutParams runningPosition = (WindowManager.LayoutParams) control(service).getLayoutParams();
+        assertEquals("START must preserve the user's control placement", placedX, runningPosition.x);
+        assertEquals(placedY, runningPosition.y);
         until=SystemClock.elapsedRealtime()+180000;
         while(service.busy()&&SystemClock.elapsedRealtime()<until)Thread.sleep(500);
         assertFalse("Session timed out: "+service.status(),service.busy());
         assertEquals("2 attacks and 4 verified wall upgrades.",service.status());
+        assertEquals("Duplicate START events must not queue another session", startsBefore + 1, starts(store));
         // Exercise the production payment adapter directly against a real Android
         // confirmation. A changed price and insufficient reserve must send no tap.
         scene(context,"confirm","gold",true);
@@ -105,7 +156,9 @@ public class NativeLoopTest {
             scene(context,"home","gold",true);
             instrumentation.runOnMainSync(()->service.prepare(MacroService.DIAGNOSE));
             Thread.sleep(1000);
-            int[] covered={40,40};
+            LinearLayout floating = control(service);
+            int[] location = new int[2]; floating.getLocationOnScreen(location);
+            int[] covered={location[0] - store.left() + floating.getWidth() / 2, location[1] - store.top() + floating.getHeight() / 2};
             Exception blocked=assertThrows(Exception.class,()->port.point(covered,"home"));
             assertTrue(blocked.toString(),blocked.getMessage().contains("covers") || (blocked.getCause()!=null && blocked.getCause().getMessage().contains("covers")));
             // InputManager-injected keys can bypass Accessibility's hardware-key
@@ -118,5 +171,17 @@ public class NativeLoopTest {
             assertFalse(service.busy()); assertEquals("Stopped with Volume Down",service.status());
             assertThrows(Exception.class,()->port.point(new int[]{150,920},"home"));
         }
+        // Recognition must use the troop-counter parser, not the money parser:
+        // a valid x2 counter previously appeared as an invalid null amount.
+        scene(context,"scout","gold",true);
+        instrumentation.runOnMainSync(() -> service.prepare(MacroService.DIAGNOSE));
+        Thread.sleep(1000);
+        Button captureButton = (Button) control(service).getChildAt(1);
+        instrumentation.runOnMainSync(captureButton::performClick);
+        until=SystemClock.elapsedRealtime()+60000;
+        while(service.busy()&&SystemClock.elapsedRealtime()<until)Thread.sleep(200);
+        assertFalse("Recognition timed out: " + service.status(),service.busy());
+        String report = new String(Files.readAllBytes(new java.io.File(store.directory,"last-diagnostic.txt").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(report, report.lines().anyMatch(line -> line.startsWith("dragon_count:") && line.endsWith(" → 2")));
     }
 }

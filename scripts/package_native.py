@@ -12,7 +12,7 @@ shutil.copy2(root / 'START-HERE.txt', dist / 'Dragon-Farmer-Setup.txt')
 excluded = {'build', '.gradle', 'signing', 'local.properties'}
 files = [p for p in (root / 'native').rglob('*')
          if p.is_file() and not excluded.intersection(p.relative_to(root / 'native').parts)]
-files += [root / 'README.md', root / 'START-HERE.txt', root / '.gitignore']
+files += [root / 'README.md', root / 'START-HERE.txt', root / '.gitignore', root / 'LICENSE']
 files += list((root / 'scripts').glob('*'))
 archive = dist / 'Dragon-Farmer-Source.zip'
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:

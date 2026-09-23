@@ -7,13 +7,13 @@ An experimental, standalone Android accessibility app for repetitive Clash of Cl
 
 ## Current status
 
-Version 0.3 is a device-test release for Android 14 and newer. It includes local OCR, screen calibration, guarded taps, resource reserves, wall-price verification, session limits, a floating STOP button, and Volume Down cancellation.
+Version 0.3.1 is a device-test release for Android 14 and newer. It includes local OCR, screen calibration, guarded taps, resource reserves, wall-price verification, session limits, a floating STOP button, and Volume Down cancellation.
 
-The final automated run passed 27 JVM tests and 9 Android tests, including two synthetic attacks and four verified synthetic wall upgrades. Samsung One UI and current live-game behavior still need field testing. Read the [verification report](native/VERIFICATION.md) and [bug audit](native/BUG-AUDIT.md) for the exact scope.
+The latest automated run passed 27 JVM tests and 11 Android tests, including two synthetic attacks and four verified synthetic wall upgrades. Samsung One UI and current live-game behavior still need field testing. Read the [verification report](native/VERIFICATION.md) and [bug audit](native/BUG-AUDIT.md) for the exact scope.
 
 ## Install
 
-1. Download `Dragon-Farmer.apk` from the [v0.3.0 device-test release](https://github.com/AtanasIvanov07/clash-dragon-farmer/releases/tag/v0.3.0).
+1. Download `Dragon-Farmer.apk` from the [v0.3.1 device-test release](https://github.com/AtanasIvanov07/clash-dragon-farmer/releases/tag/v0.3.1).
 2. Install it, open Dragon Farmer, and enable its Accessibility service.
 3. Set Clash to English and landscape. Prepare dragons and leave one builder free.
 4. Follow **Capture game screens**, then enter your actual dragon count.

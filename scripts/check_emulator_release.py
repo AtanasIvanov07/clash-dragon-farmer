@@ -48,8 +48,12 @@ if mode=='hardware':
     assert result=='Stopped with Volume Down',result
     print('Virtual hardware Volume Down: PASS')
 elif mode=='upgrade':
+    assert len(sys.argv) == 3, 'Pass the previous signed APK path: upgrade <previous.apk>'
+    previous = Path(sys.argv[2]).resolve()
+    assert previous.is_file(), f'Previous APK not found: {previous}'
     command('uninstall','dev.s25.farmer')
-    command('install',str(root/'dist/Dragon-Farmer.apk'))
+    command('install',str(previous))
+    assert 'versionName=0.3.0-device-test' in command('shell','dumpsys','package','dev.s25.farmer'), 'Expected v0.3.0 baseline'
     command('shell','am','start','-n','dev.s25.farmer/.MainActivity')
     time.sleep(1)
     click('Army & farming settings')
@@ -61,6 +65,7 @@ elif mode=='upgrade':
     click('Save')
     assert any(n.get('text')=='Dragons in your army: 17' for n in ui().iter('node'))
     command('install','-r',str(root/'native/app/build/outputs/apk/release/app-release.apk'))
+    assert 'versionName=0.3.1-device-test' in command('shell','dumpsys','package','dev.s25.farmer'), 'Expected v0.3.1 update'
     command('shell','am','start','-n','dev.s25.farmer/.MainActivity')
     time.sleep(1)
     click('Army & farming settings')

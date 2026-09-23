@@ -1,6 +1,12 @@
-# Native app bug review — version 0.3.0
+# Native app bug review — version 0.3.1
 
 Reviewed the standalone Android implementation, calibration UI and persistence, image/OCR handling, farming state machine, Accessibility lifecycle, release manifest and packaging. The legacy AutoJs6 implementation is outside this review. The user confirmed that the S25 APK has not yet been installed or tried.
+
+## Follow-up fixes in 0.3.1
+
+The floating control now keeps its dragged position when START changes to STOP and clamps again when the display layout changes. Each START/CAPTURE button accepts only its first click, so delayed duplicate events cannot queue another session. Screenshot cancellation and timeout races release a frame that arrived just as the wait ended. The recognition report parses `dragon_count` with the troop-counter parser, so `x2` is reported as 2. The source ZIP now includes the MIT license.
+
+The complete Android suite passed again after these changes, including a synthetic two-attack/four-upgrade run. Its first attempt failed before calibration because the synthetic app had not become the active window; the test now waits for that condition and the isolated and complete reruns passed. This fixture timing issue did not exercise an in-game action. See `VERIFICATION.md` for test scope and remaining device checks.
 
 ## Findings fixed
 

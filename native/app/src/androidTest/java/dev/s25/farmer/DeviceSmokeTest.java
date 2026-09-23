@@ -8,10 +8,36 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.*;
 import org.junit.runner.RunWith;
 import java.util.*;
+import java.util.concurrent.*;
 import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class DeviceSmokeTest {
+    @Test public void interruptedCaptureReleasesAlreadyDeliveredImage() throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
+        Frame frame = new Frame(bitmap, 0, 0);
+        CompletableFuture<Frame> result = new CompletableFuture<>() {
+            @Override public Frame get(long timeout, TimeUnit unit) throws InterruptedException {
+                complete(frame); // Screenshot delivery wins just before the wait aborts.
+                throw new InterruptedException("STOP during screenshot delivery");
+            }
+        };
+        assertThrows(InterruptedException.class, () -> MacroService.awaitCapture(result));
+        assertTrue("The undelivered screenshot must not leak", bitmap.isRecycled());
+    }
+    @Test public void timedOutCaptureReleasesAlreadyDeliveredImage() throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
+        Frame frame = new Frame(bitmap, 0, 0);
+        CompletableFuture<Frame> result = new CompletableFuture<>() {
+            @Override public Frame get(long timeout, TimeUnit unit) throws TimeoutException {
+                complete(frame);
+                throw new TimeoutException("Screenshot arrived at timeout");
+            }
+        };
+        Exception error = assertThrows(java.io.IOException.class, () -> MacroService.awaitCapture(result));
+        assertTrue(error.getCause() instanceof TimeoutException);
+        assertTrue("Timeout recovery must release the unclaimed frame", bitmap.isRecycled());
+    }
     @Test public void manifestDeniesUnneededPermissions() {
         Context c = InstrumentationRegistry.getInstrumentation().getTargetContext();
         for (String p : List.of("android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE", "android.permission.READ_CONTACTS", "android.permission.READ_SMS", "android.permission.RECORD_AUDIO", "android.permission.CAMERA", "android.permission.SYSTEM_ALERT_WINDOW")) {

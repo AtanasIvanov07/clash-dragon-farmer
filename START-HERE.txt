@@ -9,7 +9,7 @@ DRAGON FARMER — STANDALONE S25 APP
 STOP or Volume Down ends the session. Keep Clash open and the phone unlocked.
 No AutoJs6, root, or connected PC needed.
 
-Version 0.3: calibration includes a static village landmark and dragon quantity.
+Version 0.3.1: calibration includes a static village landmark and dragon quantity.
 Updating from 0.2? Recapture Home village and Opponent scouting.
 Keep the floating control away from game buttons and deployment points.
 Test STOP and Volume Down during the supervised trial.
