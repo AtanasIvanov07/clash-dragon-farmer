@@ -37,15 +37,26 @@ public final class PickerView extends LinearLayout {
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     private Stages.Field field() { return stage.fields.get(fieldIndex); }
     private boolean pointMode() { return field().kind.startsWith("point"); }
-    private void updateHeading() { heading.setText(stage.name + " · " + (fieldIndex + 1) + "/" + stage.fields.size() + "\n" + field().instruction); }
+    private void updateHeading() { updateHeading(null, Color.WHITE); }
+    // HyperOS can hide toasts over a game, so save results are shown in the heading itself.
+    private void updateHeading(String notice, int color) {
+        heading.setTextColor(color);
+        heading.setText((notice == null ? "" : notice + "\n") + stage.name + " · " + (fieldIndex + 1) + "/" + stage.fields.size() + "\n" + field().instruction);
+    }
     private void save() {
         if (done) return;
         try {
+            boolean skipped = field().optional && rectangle == null && points.isEmpty();
             store.selection(field(), rectangle, points, frame.bitmap);
             if (fieldIndex + 1 >= stage.fields.size()) { done = true; listener.finished(); return; }
+            String saved = field().key;
             fieldIndex++;
-            rectangle = null; points.clear(); board.start = null; updateHeading(); board.invalidate();
-        } catch (Exception e) { Toast.makeText(getContext(), e.getMessage(), Toast.LENGTH_LONG).show(); }
+            rectangle = null; points.clear(); board.start = null; updateHeading((skipped ? "Skipped " : "✓ Saved ") + saved + ". Now mark the next item on the same screenshot:", Color.rgb(116, 255, 160)); board.invalidate();
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? e.toString() : e.getMessage();
+            if (!pointMode() && rectangle == null) message = "Drag a box first: press, slide, then release.";
+            updateHeading("⚠ Not saved: " + message, Color.rgb(255, 196, 120));
+        }
     }
     private final class Board extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);

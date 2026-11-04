@@ -25,6 +25,7 @@ public final class MainActivity extends Activity {
         LABELS.put("maxWallCost", "Maximum wall price"); LABELS.put("maxWallsPerVisit", "Walls per home visit");
         LABELS.put("targetWallLevel", "Target wall level (0 = any)"); LABELS.put("maxAttacks", "Attack limit");
         LABELS.put("maxMinutes", "Time limit in minutes"); LABELS.put("maxSkips", "Maximum skipped bases");
+        LABELS.put("heroAbilitySeconds", "Hero ability delay (seconds after heroes land)");
     }
     @Override public void onCreate(Bundle bundle) { super.onCreate(bundle); render(); }
     @Override public void onResume() { super.onResume(); render(); }
@@ -64,12 +65,29 @@ public final class MainActivity extends Activity {
             startActivityForResult(intent, EXPORT);
         });
         button("Short setup & installation help", () -> alert("Quick setup",
-            "1. Enable Dragon Farmer Accessibility.\n2. Capture the requested game screens.\n3. Set your actual dragon count.\n4. Check recognition, then test one attack.\n5. Start farming after the test works.\n\nStop: STOP or Volume Down.\n\nIf Accessibility is restricted: Android Settings → Apps → Dragon Farmer → ⋮ → Allow restricted settings. Then return to Accessibility. Menu names vary with One UI.\n\nNo root, separate macro app, screen-sharing app, or computer connection is needed."));
+            "1. Enable Dragon Farmer Accessibility.\n2. Capture the requested game screens.\n3. Set your actual dragon count.\n4. Check recognition, then test one attack.\n5. Start farming after the test works.\n\nStop: STOP or Volume Down.\n\nIf Accessibility is restricted: Android Settings → Apps → Dragon Farmer → ⋮ → Allow restricted settings. Then return to Accessibility. On Poco/Xiaomi: Settings → Apps → Manage apps → Dragon Farmer → ⋮ (top right) → Allow restricted settings; the menu appears only after one blocked attempt.\n\nCalibration belongs to one phone and one screen resolution. On a new phone, use Reset calibration and capture every screen again.\n\nNo root, separate macro app, screen-sharing app, or computer connection is needed."));
+        button("Poco / Xiaomi (HyperOS) setup", this::hyperOsSetup);
         button("Reset calibration", () -> { if (!idle()) return; new AlertDialog.Builder(this).setTitle("Reset saved positions?")
             .setMessage("Existing screenshots remain available for diagnostics.")
             .setPositiveButton("Reset", (d,w) -> { if (!idle()) return; try { store.reset(); render(); } catch (Exception e) { alert("Error", e.toString()); } })
             .setNegativeButton("Cancel", null).show(); });
-        text("Game automation can result in a permanent account ban. This app has not yet been verified in live gameplay on your S25.", 12, Color.rgb(125, 67, 39));
+        text("Game automation can result in a permanent account ban. This app has not yet been verified in live gameplay on your phone.", 12, Color.rgb(125, 67, 39));
+    }
+    private void hyperOsSetup() {
+        new AlertDialog.Builder(this).setTitle("Poco / Xiaomi setup")
+            .setMessage("HyperOS stops background services and draws its own game controls. Before calibrating:\n\n"
+                + "1. App info (next screen): Autostart ON, Battery saver → No restrictions.\n"
+                + "2. Recents: long-press Dragon Farmer and lock it so cleanup does not disable Accessibility.\n"
+                + "3. Game Turbo (Security app → Game Turbo): turn off the game toolbox/sidebar for Clash, or remove Clash from Game Turbo. Its edge handle covers taps and the app will refuse them.\n"
+                + "4. Settings → Display: if Screen resolution offers WQHD+/FHD+, pick one and keep it. Changing it, or a power saving mode that lowers it, invalidates calibration.\n"
+                + "5. Always hold the phone in the same landscape direction as during calibration.\n"
+                + "6. Turn off Quick ball and floating notifications near the screen edges.\n\n"
+                + "Then run Check recognition: its report lists every window above Clash and any calibrated tap it blocks.")
+            .setPositiveButton("Open app info", (d, w) -> {
+                try { startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(android.net.Uri.fromParts("package", getPackageName(), null))); }
+                catch (Exception e) { alert("Open Settings manually", "Settings → Apps → Manage apps → Dragon Farmer"); }
+            })
+            .setNegativeButton("Close", null).show();
     }
     private void calibrationMenu() {
         String[] names = new String[Stages.ALL.size()];
@@ -120,13 +138,30 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == EXPORT && result == RESULT_OK && data != null && data.getData() != null) {
-            if (!idle()) return;
+            android.net.Uri target = data.getData();
+            // The picker already created an empty file; never leave it behind silently.
+            if (!idle()) { discard(target); return; }
             Store exportStore = store;
+            Toast.makeText(this, "Exporting test details…", Toast.LENGTH_SHORT).show();
             new Thread(() -> {
-                try { OutputStream out = getContentResolver().openOutputStream(data.getData()); if (out == null) throw new IOException("Cannot write that file."); exportStore.export(out); runOnUiThread(() -> alert("Export saved", "The ZIP contains game screenshots, calibration, settings, and logs. Share it if you want help with a failed test.")); }
-                catch (Exception e) { runOnUiThread(() -> alert("Export failed", e.getMessage())); }
+                File temp = new File(getCacheDir(), "export.zip");
+                try {
+                    try (OutputStream zip = new FileOutputStream(temp)) { exportStore.export(zip); }
+                    try (OutputStream out = getContentResolver().openOutputStream(target, "w")) {
+                        if (out == null) throw new IOException("Cannot write that file.");
+                        Files.copy(temp.toPath(), out);
+                    }
+                    long kb = Math.max(1, temp.length() / 1024);
+                    runOnUiThread(() -> alert("Export saved", "Saved " + kb + " KB. The ZIP contains game screenshots, calibration, settings, and logs. Share it if you want help with a failed test."));
+                } catch (Exception e) {
+                    discard(target);
+                    runOnUiThread(() -> alert("Export failed", (e.getMessage() == null ? e.toString() : e.getMessage()) + "\n\nThe empty file was removed. Try again, or use Read last result."));
+                } finally { temp.delete(); }
             }, "diagnostic-export").start();
         }
+    }
+    private void discard(android.net.Uri document) {
+        try { android.provider.DocumentsContract.deleteDocument(getContentResolver(), document); } catch (Exception ignored) {}
     }
     private void button(String title, Runnable action) {
         Button button = new Button(this); button.setText(title); button.setAllCaps(false); button.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT); button.setTextSize(15);

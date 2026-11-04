@@ -170,7 +170,7 @@ public final class MacroService extends AccessibilityService {
             check(); Target after = target();
             if (after.id != t.id || !after.bounds.equals(t.bounds)) throw new IOException("Game window changed during capture.");
             if (calibrated && (frame.width() != store.width() || frame.height() != store.height() || frame.left != store.left() || frame.top != store.top())) {
-                throw new IOException("Display or game window size changed. Restore the calibrated screen settings.");
+                throw new IOException("Display or game window size changed. Restore the calibrated screen settings: same screen resolution, same landscape direction (camera cutout on the same side), no split screen.");
             }
             synchronized (this) {
                 if (latest != null) latest.recycle();
@@ -190,6 +190,19 @@ public final class MacroService extends AccessibilityService {
         }
     }
     private void gesture(GestureDescription gesture) throws Exception {
+        try { gestureOnce(gesture); }
+        catch (Farmer.Blocked e) {
+            // Our own STOP control was dragged over a tap: move it clear once and retry.
+            if (!e.control) throw e;
+            CompletableFuture<Boolean> moved = new CompletableFuture<>();
+            main.post(() -> moved.complete(moveControlClear()));
+            if (!moved.get(2, TimeUnit.SECONDS)) throw e;
+            store.log("control-moved", "floating control moved clear of calibrated taps");
+            pause(400);
+            gestureOnce(gesture);
+        }
+    }
+    private void gestureOnce(GestureDescription gesture) throws Exception {
         check(); Target t = target();
         int token = epoch.get();
         if (t.bounds.left != store.left() || t.bounds.top != store.top() || t.bounds.width() != store.width() || t.bounds.height() != store.height()) {
@@ -214,6 +227,8 @@ public final class MacroService extends AccessibilityService {
         try {
             if (!result.get(3, TimeUnit.SECONDS)) throw new IOException("Android cancelled or rejected a gesture.");
         } catch (TimeoutException e) { result.cancel(false); throw new IOException("Android gesture callback timed out.", e); }
+        // Surface main-thread refusals (such as Farmer.Blocked) as themselves.
+        catch (ExecutionException e) { result.cancel(false); throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e; }
         catch (Exception e) { result.cancel(false); throw e; }
         check();
     }
@@ -228,9 +243,50 @@ public final class MacroService extends AccessibilityService {
             for (AccessibilityWindowInfo w : visible) {
                 if (w.getDisplayId() != Display.DEFAULT_DISPLAY || w.getId() == target.id || w.getLayer() <= gameLayer) continue;
                 Rect bounds = new Rect(); w.getBoundsInScreen(bounds);
-                if (RectF.intersects(path, new RectF(bounds))) throw new IOException("A floating control or system window covers the next tap. Move it away and restart.");
+                if (RectF.intersects(path, new RectF(bounds))) {
+                    store.log("obstruction", describe(w));
+                    Rect control = controlBounds();
+                    boolean own = w.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY && control != null
+                            && Math.abs(control.left - bounds.left) <= 4 && Math.abs(control.top - bounds.top) <= 4;
+                    throw new Farmer.Blocked("A floating control or system window covers the next tap: " + describe(w)
+                            + ". Move the STOP control away; on Poco/Xiaomi turn off the Game Turbo toolbox for Clash. Then restart.", own);
+                }
             }
         }
+    }
+    private static String describe(AccessibilityWindowInfo w) {
+        Rect b = new Rect(); w.getBoundsInScreen(b);
+        String type = switch (w.getType()) {
+            case AccessibilityWindowInfo.TYPE_SYSTEM -> "system window";
+            case AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "accessibility overlay";
+            case AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard";
+            case AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "split-screen divider";
+            case AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY -> "magnification overlay";
+            default -> "app window";
+        };
+        return type + (w.getTitle() == null ? "" : " \"" + w.getTitle() + "\"") + " at " + b.toShortString();
+    }
+    /** Windows drawn above Clash (Game Turbo handles, bubbles, our STOP control) and the calibrated taps they would block. */
+    private String overlayReport() throws Exception {
+        Target t = target();
+        List<AccessibilityWindowInfo> visible = getWindows();
+        int gameLayer = Integer.MIN_VALUE;
+        for (AccessibilityWindowInfo w : visible) if (w.getId() == t.id) gameLayer = w.getLayer();
+        StringBuilder report = new StringBuilder();
+        for (AccessibilityWindowInfo w : visible) {
+            if (w.getDisplayId() != Display.DEFAULT_DISPLAY || w.getId() == t.id || w.getLayer() <= gameLayer) continue;
+            Rect bounds = new Rect(); w.getBoundsInScreen(bounds); bounds.inset(-2, -2);
+            report.append("• ").append(describe(w));
+            for (String key : List.of("deploy", "walls", "home_blank")) {
+                List<int[]> points = store.points(key);
+                for (int i = 0; i < points.size(); i++) {
+                    int[] p = points.get(i);
+                    if (p != null && p.length == 2 && bounds.contains(p[0] + store.left(), p[1] + store.top())) report.append(" — BLOCKS ").append(key).append(' ').append(i + 1);
+                }
+            }
+            report.append('\n');
+        }
+        return report.length() == 0 ? "none\n" : report.toString();
     }
     private void press(int[] point) throws Exception {
         if (!Rules.point(point, store.width(), store.height())) throw new IOException("Tap is outside the game window.");
@@ -296,6 +352,7 @@ public final class MacroService extends AccessibilityService {
                         report.append("Selected wall level: ").append(vision.wall(f));
                         store.saveBitmap("last-diagnostic.png", f.bitmap);
                     }
+                    report.append("\n\nWindows above Clash (the floating STOP control is an accessibility overlay):\n").append(overlayReport());
                     store.report("last-diagnostic.txt", report.toString());
                     complete(token, "Recognition report saved. Open Dragon Farmer to read it.", false);
                 } else {
@@ -319,6 +376,8 @@ public final class MacroService extends AccessibilityService {
         p.reserveGold = store.setting("reserveGold"); p.reserveElixir = store.setting("reserveElixir"); p.maxWallCost = store.setting("maxWallCost");
         p.wallsPerVisit = (int) store.setting("maxWallsPerVisit"); p.targetWallLevel = (int) store.setting("targetWallLevel"); p.wallsEnabled = store.wallsEnabled();
         p.deployments = store.points("deploy"); p.walls = store.points("walls");
+        for (String card : Stages.EXTRA_CARDS) if (store.hasTemplate(card)) p.extras.add(card);
+        p.abilitySeconds = (int) store.setting("heroAbilitySeconds");
         List<int[]> blank = store.points("home_blank"); if (!blank.isEmpty()) p.blank = blank.get(0);
         return p;
     }
@@ -329,6 +388,7 @@ public final class MacroService extends AccessibilityService {
             @Override public boolean has(Farmer.Screen f, String key) throws Exception { return vision.match((Frame) f, key) != null; }
             @Override public String read(Farmer.Screen f, String key) throws Exception { return vision.read((Frame) f, key); }
             @Override public Integer wall(Farmer.Screen f) throws Exception { return vision.wall((Frame) f); }
+            @Override public int[] find(Farmer.Screen f, String key) throws Exception { return vision.match((Frame) f, key); }
             @Override public void tap(String key, String... guards) throws Exception {
                 try (Frame f = MacroService.this.capture(true)) {
                     for (String guard : guards) if (vision.match(f, guard) == null) throw new IOException("Screen changed before " + key + ".");
@@ -363,6 +423,21 @@ public final class MacroService extends AccessibilityService {
                     if (guard.equals("home_anchor") && vision.match(f, "home") == null) throw new IOException("Home is not ready for wall selection.");
                     press(p);
                 }
+            }
+            @Override public int burst(List<int[]> points, String... guards) throws Exception {
+                try (Frame f = MacroService.this.capture(true)) {
+                    boolean known = false;
+                    for (String guard : guards) if (vision.match(f, guard) != null) { known = true; break; }
+                    if (!known) throw new IOException("Unknown screen before deployment.");
+                }
+                // No screenshot between taps: Android allows only ~3 per second. Each press
+                // still checks the game window, its position and covering windows.
+                int sent = 0;
+                for (int[] p : points) {
+                    try { press(p); sent++; }
+                    catch (Farmer.Blocked e) { store.log("deploy-blocked", Arrays.toString(p) + ": " + e.getMessage()); }
+                }
+                return sent;
             }
             @Override public void pause(long ms) throws Exception { MacroService.this.pause(ms); }
             @Override public void zoom(String guard) throws Exception {
@@ -450,6 +525,51 @@ public final class MacroService extends AccessibilityService {
         overlay = row; controlLayout = p; windows.addView(row, p);
         row.addOnLayoutChangeListener((v, l, t, r, b, oldL, oldT, oldR, oldB) -> clampControl());
         row.post(this::clampControl);
+        // While work runs, start from a spot that covers none of the calibrated taps.
+        if (action == null) row.post(() -> { if (overlay == row) moveControlClear(); });
+    }
+    private Rect controlBounds() {
+        if (overlay == null || controlLayout == null || !overlay.isAttachedToWindow()) return null;
+        int[] at = new int[2]; overlay.getLocationOnScreen(at);
+        return new Rect(at[0], at[1], at[0] + overlay.getWidth(), at[1] + overlay.getHeight());
+    }
+    /** Screen areas a session taps or swipes: calibrated points, tapped buttons, the whole troop-bar row and the zoom pinch. */
+    private List<Rect> tapAreas() {
+        List<Rect> areas = new ArrayList<>();
+        int l = store.left(), t = store.top(), w = store.width(), h = store.height(), m = dp(12);
+        for (String key : List.of("deploy", "walls", "home_blank")) {
+            for (int[] p : store.points(key)) if (p != null && p.length == 2) areas.add(new Rect(l + p[0] - m, t + p[1] - m, l + p[0] + m, t + p[1] + m));
+        }
+        for (String key : List.of("home", "find_match", "start_attack", "scout", "result", "wall_gold", "wall_elixir", "confirm_gold", "confirm_elixir")) {
+            int[] r = store.rectangle("templates", key);
+            if (r != null && r.length == 4) areas.add(new Rect(l + r[0] - m, t + r[1] - m, l + r[0] + r[2] + m, t + r[1] + r[3] + m));
+        }
+        int[] dragon = store.rectangle("templates", "dragon"); // the card slides along the bar
+        if (dragon != null && dragon.length == 4) areas.add(new Rect(l, t + dragon[1] - m, l + w, t + dragon[1] + dragon[3] + m));
+        areas.add(new Rect(l + w / 4 - m, t + h * 34 / 100 - m, l + w * 46 / 100 + m, t + h * 45 / 100 + m));
+        areas.add(new Rect(l + w * 54 / 100 - m, t + h * 55 / 100 - m, l + w * 3 / 4 + m, t + h * 66 / 100 + m));
+        return areas;
+    }
+    /** Moves the floating control to the first spot, top edge first and center outward, that covers no tap area. */
+    private boolean moveControlClear() {
+        if (controlBounds() == null || store == null || store.width() <= 0) return false;
+        Rect screen = windows.getCurrentWindowMetrics().getBounds();
+        int cw = Math.max(1, overlay.getWidth()), ch = Math.max(dp(54), overlay.getHeight());
+        int spanX = Math.max(0, screen.width() - cw), spanY = Math.max(0, screen.height() - ch), step = Math.max(1, spanX / 20);
+        List<Integer> rows = new ArrayList<>(List.of(0, spanY));
+        for (int k = 1; k < 8; k++) rows.add(spanY * k / 8);
+        List<Rect> areas = tapAreas();
+        for (int y : rows) for (int i = 0; i <= 40; i++) {
+            int x = spanX / 2 + (i % 2 == 0 ? 1 : -1) * ((i + 1) / 2) * step;
+            if (x < 0 || x > spanX) continue;
+            Rect spot = new Rect(x, y, x + cw, y + ch); boolean clear = true;
+            for (Rect area : areas) if (Rect.intersects(spot, area)) { clear = false; break; }
+            if (!clear) continue;
+            controlLayout.x = x; controlLayout.y = y; controlX = x; controlY = y;
+            windows.updateViewLayout(overlay, controlLayout);
+            return true;
+        }
+        return false;
     }
     private void clampControl() {
         if (overlay == null || controlLayout == null || !overlay.isAttachedToWindow()) return;

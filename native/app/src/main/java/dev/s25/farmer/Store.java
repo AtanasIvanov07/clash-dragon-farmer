@@ -20,6 +20,7 @@ public final class Store {
         DEFAULTS.put("maxWallCost", 10_000_000L); DEFAULTS.put("maxWallsPerVisit", 2L);
         DEFAULTS.put("targetWallLevel", 0L); DEFAULTS.put("maxAttacks", 30L);
         DEFAULTS.put("maxMinutes", 90L); DEFAULTS.put("maxSkips", 40L);
+        DEFAULTS.put("heroAbilitySeconds", 8L);
     }
     public Store(Context context) throws Exception {
         directory = context.getFilesDir();
@@ -48,7 +49,7 @@ public final class Store {
     public synchronized int top() { return profile.optInt("top"); }
     public synchronized void dimensions(Frame f) throws Exception {
         if (width() > 0 && (width() != f.width() || height() != f.height() || left() != f.left || top() != f.top)) {
-            throw new IOException("Display dimensions changed. Restore your calibrated view or reset calibration.");
+            throw new IOException("Display dimensions changed. Restore your calibrated view (same resolution and landscape direction) or reset calibration. A new phone always needs Reset calibration first.");
         }
         profile.put("width", f.width()).put("height", f.height()).put("left", f.left).put("top", f.top);
         write("profile.json", profile);
@@ -63,9 +64,10 @@ public final class Store {
             case "maxAttacks" -> 10000;
             case "maxSkips" -> 1000;
             case "maxWallsPerVisit" -> 50;
+            case "heroAbilitySeconds" -> 180;
             default -> 100_000_000;
         };
-        boolean zeroAllowed = key.startsWith("minimum") || key.startsWith("reserve") || key.equals("targetWallLevel");
+        boolean zeroAllowed = key.startsWith("minimum") || key.startsWith("reserve") || key.equals("targetWallLevel") || key.equals("heroAbilitySeconds");
         if (!DEFAULTS.containsKey(key) || value < (zeroAllowed ? 0 : 1) || value > max) {
             throw new IllegalArgumentException("Enter a whole number from " + (zeroAllowed ? 0 : 1) + " to " + max + ".");
         }
@@ -87,6 +89,13 @@ public final class Store {
         return result;
     }
     public synchronized void selection(Stages.Field field, int[] rect, List<int[]> points, Bitmap frame) throws Exception {
+        if (field.optional && rect == null && points.isEmpty()) {
+            // Skipped: the farmer leaves this step out.
+            profile.getJSONObject(field.kind.equals("template") ? "templates" : "regions").remove(field.key);
+            new File(directory, "templates/" + field.key + ".png").delete();
+            write("profile.json", profile);
+            return;
+        }
         if (field.kind.equals("point") || field.kind.equals("points")) {
             JSONArray list = new JSONArray();
             for (int[] p : points) {
@@ -109,8 +118,13 @@ public final class Store {
         }
         write("profile.json", profile);
     }
+    /** A calibrated template with its image saved. */
+    public synchronized boolean hasTemplate(String key) {
+        return Rules.rect(rectangle("templates", key), width(), height()) && new File(directory, "templates/" + key + ".png").isFile();
+    }
     public synchronized boolean complete(Stages.Stage stage) {
         for (Stages.Field f : stage.fields) {
+            if (f.optional) continue;
             if (!wallsEnabled() && List.of("home_anchor", "home_gold", "home_elixir", "home_blank", "walls").contains(f.key)) continue;
             if (f.kind.startsWith("point")) {
                 List<int[]> points = points(f.key);
@@ -127,7 +141,7 @@ public final class Store {
     public synchronized List<String> missing() {
         List<String> list = new ArrayList<>();
         for (int i = 0; i < Stages.ALL.size(); i++) {
-            if (!wallsEnabled() && i >= 5) continue;
+            if (!wallsEnabled() && i >= Stages.FIRST_WALL_STAGE) continue;
             if (!complete(Stages.ALL.get(i))) list.add(Stages.ALL.get(i).name);
         }
         return list;
@@ -159,7 +173,21 @@ public final class Store {
     }
     public synchronized void report(String name, String text) throws IOException { Files.write(new File(directory, name).toPath(), text.getBytes(StandardCharsets.UTF_8)); }
     public synchronized void export(OutputStream output) throws IOException {
-        try (ZipOutputStream zip = new ZipOutputStream(output)) { add(zip, directory, ""); }
+        try (ZipOutputStream zip = new ZipOutputStream(output)) {
+            // Always one entry, so a fresh install still exports a valid, non-empty ZIP.
+            StringBuilder info = new StringBuilder("Dragon Farmer " + BuildConfig.VERSION_NAME + "\nPhone: " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL
+                    + "\nAndroid " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")\nExported " + new Date() + "\n\nApp files:\n");
+            list(info, directory, "");
+            zip.putNextEntry(new ZipEntry("export-info.txt")); zip.write(info.toString().getBytes(StandardCharsets.UTF_8)); zip.closeEntry();
+            add(zip, directory, "");
+        }
+    }
+    private void list(StringBuilder out, File dir, String prefix) {
+        File[] entries = dir.listFiles(); if (entries == null) return;
+        for (File f : entries) {
+            if (f.isDirectory()) list(out, f, prefix + f.getName() + "/");
+            else out.append(prefix).append(f.getName()).append("  ").append(f.length()).append(" bytes\n");
+        }
     }
     private void add(ZipOutputStream z, File dir, String prefix) throws IOException {
         File[] entries = dir.listFiles(); if (entries == null) return;

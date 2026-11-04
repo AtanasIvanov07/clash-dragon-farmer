@@ -17,7 +17,11 @@ public class FarmerTest {
         int[] levels = {17, 17};
         boolean badLoot, wrongBuilding, changedPrice, badDeduction, unknownMenu, wrongDeselect;
         boolean fastSkip, shiftedVillage, hiddenLevel, autoDeselect;
-        int rejectedDeployments;
+        int rejectedDeployments, unreadableBases, blockedX = -1, missedCountReads, bursts;
+        String selected;
+        long battleLength, battleEnd, heroLanded;
+        List<String> abilities = new ArrayList<>();
+        List<String> extrasDeployed = new ArrayList<>(), order = new ArrayList<>(), armyExtras = new ArrayList<>(List.of("siege", "hero_1", "hero_2"));
         boolean insufficientArmy, rejectSecond, secondRejected;
         List<String> taps = new ArrayList<>();
         Sim() {
@@ -27,14 +31,21 @@ public class FarmerTest {
         void move(String next) { state = "transition"; pending = next; transitionTime = time + 300; }
         @Override public long now() { return time; }
         @Override public void pause(long ms) { time += ms; }
-        @Override public Farmer.Screen capture() { if (pending != null && time >= transitionTime) { state = pending; pending = null; } return new Screen(state); }
+        @Override public Farmer.Screen capture() {
+            if (pending != null && time >= transitionTime) { state = pending; pending = null; }
+            if (battleEnd > 0 && time >= battleEnd && state.equals("battle")) { state = "result"; battleEnd = 0; }
+            return new Screen(state);
+        }
+        @Override public int[] find(Farmer.Screen f, String k) { return has(f, k) ? new int[] {600 + Stages.EXTRA_CARDS.indexOf(k), 900} : null; }
         @Override public boolean has(Farmer.Screen f, String k) {
             String s = ((Screen) f).state;
             return switch(k) {
                 case "home" -> s.equals("home") || s.equals("selected");
                 case "home_anchor" -> !shiftedVillage && (s.equals("home") || s.equals("selected"));
                 case "find_match" -> s.equals("menu");
+                case "start_attack" -> s.equals("army");
                 case "scout", "dragon" -> s.equals("scout");
+                case "siege", "hero_1", "hero_2" -> armyExtras.contains(k) && !extrasDeployed.contains(k) && (s.equals("scout") || s.equals("battle"));
                 case "battle" -> s.equals("battle");
                 case "result" -> s.equals("result");
                 case "wall_gold", "wall_elixir" -> s.equals("selected");
@@ -46,9 +57,11 @@ public class FarmerTest {
         @Override public void tap(String k, String... guards) {
             try (Farmer.Screen f = capture()) { for (String g : guards) if (!has(f,g)) throw new IllegalStateException("Missing guard " + g); }
             taps.add(k);
+            if (k.equals("dragon") || p.extras.contains(k)) selected = k;
             switch(k) {
                 case "home" -> move(unknownMenu ? "unknown" : "menu");
-                case "find_match" -> move("scout");
+                case "find_match" -> move("army");
+                case "start_attack" -> move("scout");
                 case "scout" -> { skips++; if (!fastSkip) move("scout"); }
                 case "result" -> { dragons=0; move("home"); }
                 case "wall_gold", "wall_elixir" -> { resource = k.substring(5); move("confirm"); }
@@ -63,22 +76,43 @@ public class FarmerTest {
             long balance = currency.equals("gold") ? gold : elixir;
             tap("confirm_" + currency, "wall_confirm", "confirm_" + currency); return balance;
         }
-        @Override public void point(int[] p, String guard) {
+        @Override public void point(int[] p, String guard) throws Exception {
             try (Farmer.Screen f = capture()) { if (!has(f,guard)) throw new IllegalStateException("Missing point guard " + guard); }
-            if (p[1] == 300) {
-                if (rejectedDeployments > 0) { rejectedDeployments--; return; }
-                if (rejectSecond && dragons == 1 && !secondRejected) { secondRejected=true; return; }
-                dragons++; totalDeployed++; state = dragons == this.p.dragons ? "result" : "battle";
-            }
+            if (p[1] == 300) throw new IllegalStateException("Deployment must use burst()");
+            else if (p[1] == 900) abilities.add(Stages.EXTRA_CARDS.get(p[0] - 600) + "@" + time);
             else if (p[0] == 400) state = wrongDeselect ? "selected" : "home";
             else { wallIndex = p[0] == 100 ? 0 : 1; state = "selected"; }
         }
+        @Override public int burst(List<int[]> points, String... guards) {
+            try (Farmer.Screen f = capture()) { if (Arrays.stream(guards).noneMatch(g -> has(f, g))) throw new IllegalStateException("Missing burst guard"); }
+            bursts++; int sent = 0;
+            for (int[] p : points) {
+                if (p[0] == blockedX) continue;
+                sent++;
+                if (state.equals("result")) continue;
+                if (this.p.extras.contains(selected)) { if (selected.startsWith("hero_")) heroLanded = time; extrasDeployed.add(selected); selected = null; }
+                else {
+                    if (rejectedDeployments > 0) { rejectedDeployments--; continue; }
+                    if (rejectSecond && dragons == 1 && !secondRejected) { secondRejected=true; continue; }
+                    dragons++; totalDeployed++; order.add("dragon");
+                }
+                if (selected == null) order.add(extrasDeployed.get(extrasDeployed.size() - 1));
+                boolean extrasDone = this.p.extras.stream().filter(armyExtras::contains).allMatch(extrasDeployed::contains);
+                boolean over = dragons == this.p.dragons && extrasDone;
+                if (over && battleLength > 0) { if (battleEnd == 0) battleEnd = time + battleLength; over = false; }
+                state = over ? "result" : "battle";
+            }
+            return sent;
+        }
         @Override public Integer wall(Farmer.Screen f) { return ((Screen) f).state.equals("selected") && !wrongBuilding && !(hiddenLevel && levels[wallIndex] > 17) ? levels[wallIndex] : null; }
         @Override public String read(Farmer.Screen f, String key) {
-            if (key.equals("dragon_count")) return "x" + ((insufficientArmy ? 1 : p.dragons) - dragons);
+            if (key.equals("dragon_count")) {
+                if (missedCountReads > 0 && dragons > 0) { missedCountReads--; return ""; }
+                return "x" + ((insufficientArmy ? 1 : p.dragons) - dragons);
+            }
             if (key.equals("home_gold")) return Long.toString(gold);
             if (key.equals("home_elixir")) return Long.toString(elixir);
-            if (key.startsWith("loot_")) return badLoot ? "1O00000" : skips < poorBases ? "100000" : "1000000";
+            if (key.startsWith("loot_")) return badLoot || skips < unreadableBases ? "1O00000" : skips < poorBases ? "100000" : "1000000";
             if (key.startsWith("confirm_") && changedPrice) return "999999";
             return key.contains("gold") ? "2000000" : "3000000";
         }
@@ -90,7 +124,7 @@ public class FarmerTest {
     @Test public void attackThenBothWallResources() throws Exception {
         Sim s = new Sim(); assertEquals("1 attacks and 2 verified wall upgrades.",s.run());
         assertEquals(8_000_000,s.gold); assertEquals(7_000_000,s.elixir);
-        assertEquals(List.of("home","find_match","dragon","result","wall_gold","confirm_gold","wall_elixir","confirm_elixir"),s.taps);
+        assertEquals(List.of("home","find_match","start_attack","dragon","result","wall_gold","confirm_gold","wall_elixir","confirm_elixir"),s.taps);
     }
     @Test public void repeatsConfiguredAttacks() throws Exception {
         Sim s = new Sim(); s.p.maxAttacks=3; s.p.wallsEnabled=false;
@@ -102,6 +136,10 @@ public class FarmerTest {
     @Test public void stopsAtSkipLimit() {
         Sim s = new Sim(); s.poorBases=100; s.p.maxSkips=2;
         assertThrows(IllegalStateException.class,s::run); assertFalse(s.taps.contains("dragon"));
+    }
+    @Test public void skipsOccasionalUnreadableLoot() throws Exception {
+        Sim s = new Sim(); s.unreadableBases=2; s.p.wallsEnabled=false;
+        assertEquals("1 attacks and 0 verified wall upgrades.",s.run()); assertEquals(2,s.skips);
     }
     @Test public void badLootNeverDeploys() {
         Sim s = new Sim(); s.badLoot=true; assertThrows(IllegalStateException.class,s::run); assertFalse(s.taps.contains("dragon"));
@@ -154,6 +192,52 @@ public class FarmerTest {
     }
     @Test public void rejectedLaterTapDoesNotCountAsADeployedDragon() throws Exception {
         Sim s = new Sim(); s.rejectSecond = true; s.run(); assertTrue(s.secondRejected); assertEquals(2,s.totalDeployed);
+    }
+    @Test public void deploysWholeArmyPastACoveredPoint() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 17; s.p.wallsEnabled = false; s.blockedX = 30;
+        s.p.deployments = List.of(new int[]{10,300}, new int[]{20,300}, new int[]{30,300}, new int[]{40,300});
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(17, s.totalDeployed);
+    }
+    @Test public void wholeArmyGoesOutInOneBurst() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 17; s.p.wallsEnabled = false;
+        s.p.deployments = List.of(new int[]{10,300}, new int[]{20,300}, new int[]{40,300});
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(17, s.totalDeployed); assertEquals(1, s.bursts);
+    }
+    @Test public void siegeAndHeroesFollowTheDragons() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 5; s.p.wallsEnabled = false; s.p.extras = List.of("siege", "hero_1", "hero_2");
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run());
+        assertEquals(List.of("dragon", "dragon", "dragon", "dragon", "dragon", "siege", "hero_1", "hero_2"), s.order);
+    }
+    @Test public void heroAbilitiesFireAfterTheDelay() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("siege", "hero_1", "hero_2");
+        s.p.abilitySeconds = 8; s.battleLength = 60_000;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run());
+        assertEquals(2, s.abilities.size()); // the siege machine has no ability
+        for (String a : s.abilities) {
+            assertTrue(a, a.startsWith("hero_"));
+            assertTrue(a, Long.parseLong(a.split("@")[1]) - s.heroLanded >= 8_000);
+        }
+    }
+    @Test public void battleEndingFirstSkipsAbilities() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("hero_1");
+        s.p.abilitySeconds = 30; s.battleLength = 5_000;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertTrue(s.abilities.isEmpty());
+    }
+    @Test public void missingSiegeIsSkippedNotFatal() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("siege", "hero_1"); s.armyExtras.remove("siege");
+        s.run(); assertEquals(List.of("dragon", "dragon", "dragon", "hero_1"), s.order);
+    }
+    @Test public void rejectedTapsAreRetriedInAnotherBurst() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 17; s.p.wallsEnabled = false; s.rejectedDeployments = 5;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(17, s.totalDeployed); assertEquals(2, s.bursts);
+    }
+    @Test public void missedCountReadsDoNotStopDeployment() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 17; s.p.wallsEnabled = false; s.missedCountReads = 3; s.rejectedDeployments = 4;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(17, s.totalDeployed);
+    }
+    @Test public void everyPointCoveredStopsWithoutDeploying() {
+        Sim s = new Sim(); s.p.deployments = List.of(new int[]{30,300}); s.blockedX = 30;
+        assertThrows(IllegalStateException.class, s::run); assertEquals(0, s.totalDeployed);
     }
     @Test public void insufficientArmyStopsBeforeSelectingTroops() {
         Sim s = new Sim(); s.insufficientArmy = true; assertThrows(IllegalStateException.class,s::run); assertFalse(s.taps.contains("dragon"));

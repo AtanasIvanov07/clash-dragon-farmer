@@ -15,6 +15,7 @@ public final class Vision implements AutoCloseable {
     private final TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     private final Map<String, Template> templates = new HashMap<>();
     private boolean warmed;
+    private int dragonShift, unreadableShots;
     public Vision(Store store) { this.store = store; }
     private static final class Template {
         int w, h;
@@ -51,8 +52,13 @@ public final class Vision implements AutoCloseable {
         Template t = template(key);
         if (t.w != r[2] || t.h != r[3]) throw new IOException("Template dimensions differ from calibration.");
         int[] pixels = f.pixels();
-        int tolerance = key.equals("home_anchor") ? 1 : 8;
-        int minX = Math.max(0, r[0] - tolerance), maxX = Math.min(f.width() - t.w, r[0] + tolerance);
+        // 8 px was tuned on a 1080p-tall S25 screen. Keep the same physical slack on
+        // taller panels (1440p Poco/Xiaomi) by scaling with the short screen side.
+        int tolerance = key.equals("home_anchor") ? 1 : Math.max(8, Math.round(8f * Math.min(f.width(), f.height()) / 1080f));
+        // Clash centers the troop bar, so the dragon card slides sideways when the
+        // army has more or fewer cards (Clan Castle troops, spells, sieges).
+        boolean troopBar = key.equals("dragon") || Stages.EXTRA_CARDS.contains(key);
+        int minX = troopBar ? 0 : Math.max(0, r[0] - tolerance), maxX = troopBar ? f.width() - t.w : Math.min(f.width() - t.w, r[0] + tolerance);
         int minY = Math.max(0, r[1] - tolerance), maxY = Math.min(f.height() - t.h, r[1] + tolerance);
         double best = 0.94; int[] found = null;
         for (int y = minY; y <= maxY; y++) for (int x = minX; x <= maxX; x++) {
@@ -72,6 +78,7 @@ public final class Vision implements AutoCloseable {
             double score = (ab - a * b / count) / denominator;
             if (score >= best) { best = score; found = new int[] {x + t.w / 2, y + t.h / 2}; }
         }
+        if (key.equals("dragon") && found != null) dragonShift = found[0] - t.w / 2 - r[0];
         return found;
     }
     public List<String> lines(Bitmap bitmap) throws Exception {
@@ -90,12 +97,96 @@ public final class Vision implements AutoCloseable {
     }
     public String read(Frame frame, String key) throws Exception {
         int[] r = store.rectangle("regions", key);
+        boolean counter = key.equals("dragon_count");
+        if (counter && r != null && r.length == 4) {
+            // The counter moves with its card. A selected card is lifted and enlarged and
+            // a depleted one is dimmed; neither matches, so keep the last seen position.
+            // The read area grows a little to cover the lift; the card's white selection
+            // border touches the area's edge and is dropped by the mask.
+            match(frame, "dragon");
+            int gx = r[2] / 8, top = Math.max(0, r[1] - r[3] / 4), left = Math.max(0, r[0] + dragonShift - gx);
+            r = new int[] {left, top, Math.min(frame.width() - left, r[2] + 2 * gx), Math.min(frame.height() - top, r[1] + r[3] + r[3] / 8 - top)};
+        }
         if (!Rules.rect(r, frame.width(), frame.height())) throw new IOException("Calibrate resource region " + key + ".");
         Bitmap crop = Bitmap.createBitmap(frame.bitmap, r[0], r[1], r[2], r[3]);
         Bitmap scaled = Bitmap.createScaledBitmap(crop, crop.getWidth() * 2, crop.getHeight() * 2, true);
         // Never combine separate OCR rows into a plausible grouped amount.
-        try { return key.equals("dragon_count") ? counterText(scaled) : String.join("\n", lines(scaled)).trim(); }
+        try {
+            // Clash draws numbers as white/cream fill with a black outline over busy
+            // art, which ML Kit misreads (e.g. "2 762 711" as "27627NI"). Read only the
+            // fill first; fall back to the untouched crop if that is not a valid value.
+            Mask mask = digitMask(scaled, counter);
+            String masked = mask == null ? "" : counter ? counterText(mask.bitmap) : String.join("\n", lines(mask.bitmap)).trim();
+            if (mask != null) mask.bitmap.recycle();
+            // Opponent loot decides attacks: ML Kit can silently drop a thin leading "1"
+            // ("1 852 708" → "852 708"), so its digits must match the glyphs on screen.
+            boolean loot = key.startsWith("loot_");
+            if (loot) masked = lootDigits(masked);
+            if ((counter ? Rules.troopCount(masked) != null : Rules.number(masked) != null) && (!loot || glyphs(masked) == mask.glyphs)) return masked;
+            String plain = counter ? counterText(scaled) : String.join("\n", lines(scaled)).trim();
+            if (loot) plain = lootDigits(plain);
+            if (loot && (mask == null || Rules.number(plain) == null || glyphs(plain) != mask.glyphs)) {
+                store.log("ocr-unreadable", key + ": masked \"" + masked + "\", plain \"" + plain + "\", glyphs " + (mask == null ? 0 : mask.glyphs));
+                store.saveBitmap("unreadable-" + key + "-" + (unreadableShots++ % 3) + ".png", crop);
+                return "";
+            }
+            return plain;
+        }
         finally { if (scaled != crop) scaled.recycle(); if (crop != frame.bitmap) crop.recycle(); }
+    }
+    private static int glyphs(String text) { return text.replaceAll("[^0-9A-Za-z]", "").length(); }
+    /** Loot only: Clash's blocky 0, 1 and 5 come back as O, I/l and S/s. The glyph check above still has to pass. */
+    static String lootDigits(String text) {
+        if (!text.matches("[0-9OoIlSs ]+")) return text;
+        return text.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('S', '5').replace('s', '5');
+    }
+    static final class Mask {
+        final Bitmap bitmap; final int glyphs;
+        Mask(Bitmap bitmap, int glyphs) { this.bitmap = bitmap; this.glyphs = glyphs; }
+    }
+    /**
+     * Bright, unsaturated pixels (Clash digit fill) as black on white with a margin; specks much shorter
+     * than the digits are dropped. With dropEdges, shapes touching the crop edge (a selection border) are
+     * dropped too. Loot never uses it: a digit touching the edge must still count as a glyph.
+     */
+    static Mask digitMask(Bitmap source, boolean dropEdges) {
+        int w = source.getWidth(), h = source.getHeight(), pad = 16;
+        int[] pixels = new int[w * h]; source.getPixels(pixels, 0, w, 0, 0, w, h);
+        boolean[] on = new boolean[w * h];
+        for (int i = 0; i < pixels.length; i++) {
+            int c = pixels[i], r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+            on[i] = gray(c) >= 200 && Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b)) <= 70;
+        }
+        // 4-connected components: keep those at least half as tall as the tallest (the digits).
+        int[] component = new int[w * h], stack = new int[w * h];
+        List<Integer> heights = new ArrayList<>(); heights.add(0);
+        int tallest = 0;
+        for (int start = 0; start < on.length; start++) {
+            if (!on[start] || component[start] != 0) continue;
+            int id = heights.size(), top = h, bottom = -1, size = 0;
+            boolean edge = false;
+            stack[size++] = start; component[start] = id;
+            while (size > 0) {
+                int p = stack[--size], x = p % w, y = p / w;
+                top = Math.min(top, y); bottom = Math.max(bottom, y);
+                if (x == 0 || y == 0 || x == w - 1 || y == h - 1) edge = true;
+                if (x > 0 && on[p - 1] && component[p - 1] == 0) { component[p - 1] = id; stack[size++] = p - 1; }
+                if (x + 1 < w && on[p + 1] && component[p + 1] == 0) { component[p + 1] = id; stack[size++] = p + 1; }
+                if (y > 0 && on[p - w] && component[p - w] == 0) { component[p - w] = id; stack[size++] = p - w; }
+                if (y + 1 < h && on[p + w] && component[p + w] == 0) { component[p + w] = id; stack[size++] = p + w; }
+            }
+            if (dropEdges && edge) { heights.add(-1); continue; } // never kept: -1 * 2 < tallest
+            heights.add(bottom - top + 1); tallest = Math.max(tallest, bottom - top + 1);
+        }
+        if (tallest < 6) return dropEdges ? digitMask(source, false) : null;
+        int glyphs = 0;
+        for (int i = 1; i < heights.size(); i++) if (heights.get(i) * 2 >= tallest) glyphs++;
+        int ow = w + 2 * pad, oh = h + 2 * pad;
+        int[] out = new int[ow * oh]; Arrays.fill(out, Color.WHITE);
+        for (int i = 0; i < component.length; i++) {
+            if (component[i] != 0 && heights.get(component[i]) * 2 >= tallest) out[(i / w + pad) * ow + i % w + pad] = Color.BLACK;
+        }
+        return new Mask(Bitmap.createBitmap(out, ow, oh, Bitmap.Config.ARGB_8888), glyphs);
     }
     public String counterText(Bitmap crop) throws Exception {
         // Sparse x1 crops can be interpreted upside down as "LX" by ML Kit.

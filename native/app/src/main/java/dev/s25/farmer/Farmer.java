@@ -5,15 +5,26 @@ import java.util.*;
 /** Farming state machine. Tests use the same class with a simulated screen port. */
 public final class Farmer {
     public interface Screen extends AutoCloseable { @Override void close(); }
+    /** A tap refused because another window covers it. Nothing was sent to the game. */
+    public static final class Blocked extends java.io.IOException {
+        /** True when the covering window is this app's own floating control, which can be moved. */
+        public final boolean control;
+        public Blocked(String message) { this(message, false); }
+        public Blocked(String message, boolean control) { super(message); this.control = control; }
+    }
     public interface Port {
         long now();
         Screen capture() throws Exception;
         boolean has(Screen screen, String key) throws Exception;
         String read(Screen screen, String key) throws Exception;
         Integer wall(Screen screen) throws Exception;
+        /** Center of a visible template, or null. */
+        int[] find(Screen screen, String key) throws Exception;
         void tap(String key, String... guards) throws Exception;
         long pay(String resource, long price, long reserve, long cap) throws Exception;
         void point(int[] point, String guard) throws Exception;
+        /** Checks one guard is visible, then taps every point back to back. Covered points are skipped. Returns taps sent. */
+        int burst(List<int[]> points, String... guards) throws Exception;
         void pause(long millis) throws Exception;
         void zoom(String guard) throws Exception;
         void status(String text);
@@ -25,6 +36,10 @@ public final class Farmer {
         public int dragons = 18, maxAttacks = 30, maxMinutes = 90, maxSkips = 40, wallsPerVisit = 2, targetWallLevel = 0;
         public boolean wallsEnabled = true;
         public List<int[]> deployments = new ArrayList<>(), walls = new ArrayList<>();
+        /** Calibrated siege/hero cards, deployed after the dragons in this order. */
+        public List<String> extras = new ArrayList<>();
+        /** Seconds after the heroes land before their abilities are tapped. */
+        public int abilitySeconds = 8;
         public int[] blank;
         public void validate() {
             if (dragons < 1 || dragons > 100 || maxAttacks < 1 || maxAttacks > 10000 || maxMinutes < 1 || maxMinutes > 1440
@@ -61,11 +76,16 @@ public final class Farmer {
         throw new IllegalStateException(key + " did not change after its tap. Stopped to avoid repeated taps.");
     }
     private Long number(String region, String guard) throws Exception {
-        String a, b;
-        try (Screen f = io.capture()) { require(f, guard); a = io.read(f, region); }
-        io.pause(300);
-        try (Screen f = io.capture()) { require(f, guard); b = io.read(f, region); }
-        return Rules.stable(a, b);
+        // A value counts only once two separate captures agree; one OCR miss costs a third read.
+        List<Long> seen = new ArrayList<>();
+        for (int read = 0; read < 3; read++) {
+            if (read > 0) io.pause(300);
+            Long n;
+            try (Screen f = io.capture()) { require(f, guard); n = Rules.number(io.read(f, region)); }
+            if (n != null && seen.contains(n)) return n;
+            if (n != null) seen.add(n);
+        }
+        return null;
     }
     private void deselect() throws Exception {
         try (Screen f = io.capture()) {
@@ -135,58 +155,112 @@ public final class Farmer {
     private void attack() throws Exception {
         io.status("Finding an opponent"); waitFor("home", 10); io.tap("home", "home");
         waitFor("find_match", 10); io.tap("find_match", "find_match");
+        // Find a Match opens the army screen; its Attack! button starts the search.
+        waitFor("start_attack", 15); io.tap("start_attack", "start_attack");
         waitFor("scout", 60);
         boolean accepted = false;
-        for (int skip = 0; skip <= plan.maxSkips; skip++) {
+        for (int skip = 0, unreadable = 0; skip <= plan.maxSkips; skip++) {
             io.zoom("scout");
             Long gold = number("loot_gold", "scout"), elixir = number("loot_elixir", "scout");
-            if (gold == null || elixir == null) throw new IllegalStateException("Loot is unreadable. Recheck the digits-only crops.");
-            io.status("Loot: " + gold + " gold / " + elixir + " elixir");
-            io.log("scout", gold + " gold, " + elixir + " elixir, " + skip + " skips");
-            if (Rules.loot(gold, elixir, plan.minGold, plan.minElixir, plan.minCombined)) { accepted = true; break; }
+            if (gold == null || elixir == null) {
+                // OCR occasionally misreads one base; skipping it is cheap. A wrong crop fails every base.
+                if (++unreadable >= 5) throw new IllegalStateException("Loot is unreadable on 5 bases in a row. Recheck the digits-only crops.");
+                io.log("scout", "loot unreadable, skipping base; " + skip + " skips");
+            } else {
+                unreadable = 0;
+                io.status("Loot: " + gold + " gold / " + elixir + " elixir");
+                io.log("scout", gold + " gold, " + elixir + " elixir, " + skip + " skips");
+                if (Rules.loot(gold, elixir, plan.minGold, plan.minElixir, plan.minCombined)) { accepted = true; break; }
+            }
             if (skip == plan.maxSkips) break;
             // A fast next-base transition can finish between screenshots. Do not
             // require seeing the transient disappearance of the Next button.
             io.tap("scout", "scout"); io.pause(1000); waitFor("scout", 60);
         }
         if (!accepted) throw new IllegalStateException("Maximum skipped bases reached without enough loot.");
-        Integer remaining, checkCount;
-        try (Screen f = io.capture()) { require(f, "scout"); remaining = Rules.troopCount(io.read(f, "dragon_count")); }
-        io.pause(300);
-        try (Screen f = io.capture()) { require(f, "scout"); checkCount = Rules.troopCount(io.read(f, "dragon_count")); }
-        if (remaining == null || !remaining.equals(checkCount) || remaining < plan.dragons) throw new IllegalStateException("Dragon count is unreadable, changing, or below your configured army size.");
-        io.tap("dragon", "scout", "dragon"); io.pause(200);
-        deployment:
-        for (int i = 0; i < plan.dragons; i++) {
-            boolean deployed = false;
-            for (int attempt = 0; attempt < plan.deployments.size(); attempt++) {
-                String guard;
-                try (Screen f = io.capture()) {
-                    if (io.has(f, "result")) break deployment;
-                    guard = io.has(f, "scout") ? "scout" : "battle"; require(f, guard);
-                    if (!remaining.equals(Rules.troopCount(io.read(f, "dragon_count")))) throw new IllegalStateException("Army changed before deployment.");
-                }
-                io.point(plan.deployments.get((i + attempt) % plan.deployments.size()), guard);
-                // A tap on forbidden ground consumes no troop; retry another point.
-                for (int poll = 0; poll < 3; poll++) {
-                    io.pause(300);
-                    try (Screen f = io.capture()) {
-                        if (io.has(f, "result")) break deployment;
-                        if (!io.has(f, "scout") && !io.has(f, "battle")) throw new IllegalStateException("Unknown screen during deployment.");
-                        String rawCount = io.read(f, "dragon_count");
-                        Integer after = Rules.troopCount(rawCount);
-                        if (after == null) throw new IllegalStateException("Cannot verify remaining dragons (read: " + rawCount + "). No further deployment taps.");
-                        if (after == remaining - 1) { remaining = after; deployed = true; break; }
-                        if (!after.equals(remaining)) throw new IllegalStateException("Unexpected troop count change.");
-                    }
-                }
-                if (deployed) break;
-            }
-            if (!deployed) throw new IllegalStateException("No marked deployment point consumed a dragon. Recalibrate outer-edge points.");
+        // Two matching reads in a row; a single OCR miss only costs another read.
+        Integer remaining = null, previous = null;
+        for (int read = 0; read < 4 && remaining == null; read++) {
+            if (read > 0) io.pause(300);
+            Integer count;
+            try (Screen f = io.capture()) { require(f, "scout"); count = Rules.troopCount(io.read(f, "dragon_count")); }
+            if (count != null && count.equals(previous)) remaining = count;
+            previous = count;
         }
-        io.status("Waiting for battle results"); waitFor("result", 240);
+        if (remaining == null || remaining < plan.dragons) throw new IllegalStateException("Dragon count is unreadable, changing, or below your configured army size.");
+        io.tap("dragon", "scout", "dragon"); io.pause(150);
+        // Fast deployment: one tap per dragon still to place, sent back to back, then a
+        // single verified count. Taps on forbidden ground place nothing, so the next burst
+        // uses the following points. A burst can never place more dragons than it taps.
+        int target = remaining - plan.dragons, next = 0, emptyTaps = 0;
+        while (remaining > target) {
+            List<int[]> burst = new ArrayList<>();
+            for (int i = remaining - target; i > 0; i--) burst.add(plan.deployments.get(next++ % plan.deployments.size()));
+            io.status("Deploying " + burst.size() + " dragons");
+            int sent = io.burst(burst, "scout", "battle");
+            io.pause(400);
+            Integer left = dragonsLeft(remaining, target);
+            if (left == null) throw new IllegalStateException("Cannot verify remaining dragons after deploying. No further deployment taps.");
+            if (left < 0) break; // battle already over
+            io.log("deploy-burst", sent + " taps, " + (remaining - left) + " placed, " + (left - target) + " to go");
+            // Give up only once every marked point was tapped in a row without placing a dragon.
+            emptyTaps = left < remaining ? 0 : emptyTaps + burst.size();
+            remaining = left;
+            if (remaining > target && emptyTaps >= plan.deployments.size()) throw new IllegalStateException("No marked deployment point placed a dragon. Recalibrate outer-edge points.");
+        }
+        io.log("deployed", plan.dragons - (remaining - target) + " dragons");
+        // Siege machine, then heroes: select the card, tap the next point along the same edge.
+        // A deployed hero's card turns into its ability button at the same spot.
+        Map<String, int[]> abilities = new LinkedHashMap<>();
+        for (String card : plan.extras) {
+            int[] at;
+            try (Screen f = io.capture()) {
+                if (io.has(f, "result")) break;
+                at = io.find(f, card);
+            }
+            if (at == null) { io.log("extra-skipped", card + " not in this army"); continue; }
+            io.status("Deploying " + card.replace('_', ' '));
+            io.tap(card, card); io.pause(150);
+            io.burst(List.of(plan.deployments.get(next++ % plan.deployments.size())), "battle", "scout");
+            io.pause(250);
+            io.log("deployed", card);
+            if (card.startsWith("hero_")) abilities.put(card, at);
+        }
+        io.status("Waiting for battle results");
+        long until = io.now() + 240_000, abilityAt = io.now() + plan.abilitySeconds * 1000L;
+        while (true) {
+            try (Screen f = io.capture()) { if (io.has(f, "result")) break; }
+            if (!abilities.isEmpty() && io.now() >= abilityAt) { useAbilities(abilities); abilities.clear(); }
+            if (io.now() >= until) throw new IllegalStateException("Timed out waiting for result. Check the game or recapture that button.");
+            io.pause(250);
+        }
         io.tap("result", "result"); waitFor("home", 30); io.zoom("home");
         attacks++; io.log("attack-complete", Integer.toString(attacks));
+    }
+    /** Taps each deployed hero's card again. A hero that died or a battle that just ended only skips the rest. */
+    private void useAbilities(Map<String, int[]> heroes) throws Exception {
+        io.status("Hero abilities");
+        for (Map.Entry<String, int[]> hero : heroes.entrySet()) {
+            try { io.point(hero.getValue(), "battle"); io.log("ability", hero.getKey()); io.pause(150); }
+            catch (java.io.IOException | IllegalStateException e) { io.log("ability-skipped", hero.getKey() + ": " + e.getMessage()); return; }
+        }
+    }
+    /** Dragons still in the card, from two agreeing reads within [target, remaining]; -1 once the battle result shows; null if unreadable. */
+    private Integer dragonsLeft(int remaining, int target) throws Exception {
+        Integer previous = null;
+        for (int read = 0; read < 5; read++) {
+            if (read > 0) io.pause(200);
+            Integer n;
+            try (Screen f = io.capture()) {
+                if (io.has(f, "result")) return -1;
+                if (!io.has(f, "scout") && !io.has(f, "battle")) throw new IllegalStateException("Unknown screen during deployment.");
+                n = Rules.troopCount(io.read(f, "dragon_count"));
+            }
+            if (n != null && (n < target || n > remaining)) n = null;
+            if (n != null && n.equals(previous)) return n;
+            previous = n;
+        }
+        return null;
     }
     public String run() throws Exception {
         long end = io.now() + plan.maxMinutes * 60_000L;

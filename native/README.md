@@ -1,6 +1,6 @@
 # Native Dragon Farmer
 
-Personal Android app for the user's TH18 dragon farming setup. The release APK runs on Android 14+ and includes ARM64 and x86_64 libraries. Samsung S25 gameplay needs user calibration and an actual device trial.
+Personal Android app for the user's TH18 dragon farming setup. The release APK runs on Android 14+ and includes ARM64 and x86_64 libraries. Gameplay on any phone (Samsung S25, Poco/Xiaomi HyperOS) needs calibration on that phone and an actual device trial.
 
 The APK includes calibration, screenshot capture through Accessibility, local template matching, bundled Google ML Kit Latin OCR, farming controls, gold/elixir wall spending checks, diagnostics, and STOP/Volume Down cancellation. It requires neither AutoJs6 nor root. Keep the screen on and Clash in the foreground.
 

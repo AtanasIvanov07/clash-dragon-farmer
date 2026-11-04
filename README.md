@@ -23,6 +23,24 @@ Use the floating **STOP** button or Volume Down to end a session. Keep Clash ope
 
 Updating from 0.2 requires recapturing **Home village** and **Opponent scouting** because 0.3 adds a static village landmark and troop-count region.
 
+## Poco / Xiaomi (HyperOS)
+
+Nothing in the app is tied to one phone model: every button, number crop and tap point comes from calibration on the phone that runs it. Calibration from another phone or another screen resolution does not transfer, so on a new phone tap **Reset calibration** and capture every screen again.
+
+Version 0.3.2 (build from source; the v0.3.1 release APK does not include it) adds HyperOS support:
+
+- **Poco / Xiaomi (HyperOS) setup** in the app, which opens App info for Autostart and Battery saver → No restrictions.
+- **Check recognition** lists every window drawn above Clash (Game Turbo handle, bubbles, the STOP control) and any calibrated deployment, wall or empty-ground point it blocks.
+- An obstructed tap now names the covering window instead of a generic error.
+- Button matching tolerance scales with screen resolution, so 1440p panels get the same physical slack as the 1080p S25.
+
+Before calibrating on HyperOS:
+
+1. Try to enable Accessibility once. If it is blocked, open Settings → Apps → Manage apps → Dragon Farmer → ⋮ → **Allow restricted settings**, then enable it again.
+2. In App info, turn **Autostart** on and set **Battery saver** to **No restrictions**. Lock Dragon Farmer in Recents.
+3. Turn off the **Game Turbo** toolbox/sidebar for Clash, or remove Clash from Game Turbo. The app refuses taps under its edge handle.
+4. If Settings → Display → Screen resolution offers WQHD+/FHD+, choose one and keep it. Hold the phone in the same landscape direction you calibrated in.
+
 ## Privacy and permissions
 
 The release APK has no Internet, contacts, SMS, camera, microphone, broad-storage, or system-overlay permission. Calibration images, settings, and logs stay in app-private storage unless you explicitly export diagnostics.

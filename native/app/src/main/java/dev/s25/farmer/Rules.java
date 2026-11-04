@@ -6,7 +6,10 @@ import java.util.regex.*;
 /** Pure decision logic; Android adapters cannot authorize ambiguous numbers. */
 public final class Rules {
     private Rules() {}
-    private static final Pattern NUMBER = Pattern.compile("(?:[0-9]+|[0-9]{1,3}([ ,.'\u00a0\u202f])[0-9]{3}(?:\\1[0-9]{3})*)");
+    // Clash separates thousands with thin spaces; OCR often loses the one right after
+    // a narrow leading digit ("1574 019" for 1 574 019). Losing a space changes no digit,
+    // so a 4-digit first group is allowed before space-separated groups.
+    private static final Pattern NUMBER = Pattern.compile("(?:[0-9]+|[0-9]{1,3}([ ,.'\u00a0\u202f])[0-9]{3}(?:\\1[0-9]{3})*|[0-9]{4}( )[0-9]{3}(?:\\2[0-9]{3})*)");
     private static final Pattern WALL = Pattern.compile("^Wall\\s*\\(?\\s*Level\\s+(\\d{1,2})\\s*\\)?$", Pattern.CASE_INSENSITIVE);
     public static Long number(String text) {
         if (text == null) return null;

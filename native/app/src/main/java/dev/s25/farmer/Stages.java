@@ -5,8 +5,13 @@ import java.util.List;
 public final class Stages {
     public static final class Field {
         public final String kind, key, instruction;
-        Field(String kind, String key, String instruction) { this.kind = kind; this.key = key; this.instruction = instruction; }
+        /** Optional fields may be skipped in calibration; the farmer then leaves that step out. */
+        public final boolean optional;
+        Field(String kind, String key, String instruction) { this(kind, key, instruction, false); }
+        Field(String kind, String key, String instruction, boolean optional) { this.kind = kind; this.key = key; this.instruction = instruction; this.optional = optional; }
     }
+    /** Cards deployed after the dragons, in this order. */
+    public static final List<String> EXTRA_CARDS = List.of("siege", "hero_1", "hero_2", "hero_3", "hero_4");
     public static final class Stage {
         public final String name, instruction;
         public final List<Field> fields;
@@ -14,8 +19,11 @@ public final class Stages {
     }
     private static Field t(String k, String s) { return new Field("template", k, s); }
     private static Field r(String k, String s) { return new Field("region", k, s); }
+    private static Field ot(String k, String s) { return new Field("template", k, s, true); }
     private static Field p(String k, String s) { return new Field("point", k, s); }
     private static Field ps(String k, String s) { return new Field("points", k, s); }
+    /** Stages from this index on are only needed for wall upgrades. */
+    public static final int FIRST_WALL_STAGE = 7;
     public static final List<Stage> ALL = List.of(
         new Stage("Home village", "Open Home. Pinch fully out, center your village, and close any panels.", List.of(
             t("home", "Drag around the Attack button label, excluding scenery."),
@@ -26,6 +34,8 @@ public final class Stages {
             ps("walls", "Tap centers of the individual walls you want upgraded. Add several visible walls."))),
         new Stage("Multiplayer menu", "Tap Attack. Show the repeatable farming Find a Match button.", List.of(
             t("find_match", "Drag around Find a Match text inside its button. Exclude the search price."))),
+        new Stage("Army screen", "Tap Find a Match. Show the screen with the final Attack! button, before an opponent loads.", List.of(
+            t("start_attack", "Drag around the Attack! text inside the final button. Exclude anything that changes."))),
         new Stage("Opponent scouting", "Find a base with your dragons ready. Pinch fully out. Capture BEFORE deploying.", List.of(
             t("scout", "Drag around Next text inside the button. Exclude its price."),
             t("dragon", "Drag inside your dragon troop card. Exclude quantity and selection border."),
@@ -33,6 +43,12 @@ public final class Stages {
             r("loot_gold", "Drag around available GOLD digits only, with room for larger amounts."),
             r("loot_elixir", "Drag around available ELIXIR digits only, excluding the next row."),
             ps("deploy", "Tap several deployment points around the OUTER edges, outside the red boundary and away from controls."))),
+        new Stage("Siege & heroes (optional)", "Find a base with your full army, like Opponent scouting. Capture BEFORE deploying. These are deployed after the dragons.", List.of(
+            ot("siege", "SIEGE MACHINE card: drag inside its picture, excluding level, arrows and border. No siege? Tap Save / next without a box."),
+            ot("hero_1", "FIRST HERO card: drag inside the hero's face, excluding level, ability icon and border. Tap Save / next without a box to skip."),
+            ot("hero_2", "SECOND HERO card: drag inside the hero's face. Tap Save / next without a box to skip."),
+            ot("hero_3", "THIRD HERO card: drag inside the hero's face. Tap Save / next without a box to skip."),
+            ot("hero_4", "FOURTH HERO card: drag inside the hero's face. Tap Save / next without a box to skip."))),
         new Stage("Live battle", "Manually deploy a dragon, then capture DURING battle.", List.of(
             t("battle", "Drag around a fixed battle label such as Surrender. Exclude the timer."))),
         new Stage("Battle result", "Finish that manual attack. Capture the result before going Home.", List.of(

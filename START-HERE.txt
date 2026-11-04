@@ -1,4 +1,4 @@
-DRAGON FARMER — STANDALONE S25 APP
+DRAGON FARMER — STANDALONE ANDROID APP (Samsung S25, Poco / Xiaomi HyperOS)
 
 1. Install Dragon-Farmer.apk on your phone.
 2. Open it and enable Dragon Farmer Accessibility.
@@ -9,6 +9,9 @@ DRAGON FARMER — STANDALONE S25 APP
 STOP or Volume Down ends the session. Keep Clash open and the phone unlocked.
 No AutoJs6, root, or connected PC needed.
 
+Calibration belongs to one phone and one screen resolution. Moving to a new
+phone? Tap Reset calibration and capture every screen again on that phone.
+
 Version 0.3.1: calibration includes a static village landmark and dragon quantity.
 Updating from 0.2? Recapture Home village and Opponent scouting.
 Keep the floating control away from game buttons and deployment points.
@@ -17,6 +20,21 @@ Test STOP and Volume Down during the supervised trial.
 Accessibility blocked? Settings -> Apps -> Dragon Farmer -> three-dot menu
 -> Allow restricted settings. Then enable Accessibility.
 
-Device-test build: not yet verified in live Clash on your S25.
+POCO / XIAOMI (HyperOS) — do this before calibrating
+(also in the app: "Poco / Xiaomi (HyperOS) setup")
+- Restricted settings: try to enable Accessibility once, then
+  Settings -> Apps -> Manage apps -> Dragon Farmer -> three dots (top right)
+  -> Allow restricted settings. Enable Accessibility again and wait out the warning.
+- App info: Autostart ON, Battery saver -> No restrictions.
+- Recents: long-press Dragon Farmer and lock it.
+- Game Turbo: turn off the game toolbox/sidebar for Clash or remove Clash from
+  Game Turbo. Its edge handle covers taps and the app stops instead of tapping.
+- Display: if Screen resolution offers WQHD+/FHD+, pick one and keep it.
+- Hold the phone in the same landscape direction as during calibration.
+- Turn off Quick ball and edge floating windows.
+Then run Check recognition: it lists every window above Clash and any marked
+tap point it blocks.
+
+Device-test build: not yet verified in live Clash on any phone.
 Game automation can cause an account ban. Accessibility is a broad permission.
 The APK itself has no Internet permission.
