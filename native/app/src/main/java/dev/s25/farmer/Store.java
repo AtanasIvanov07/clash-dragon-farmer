@@ -17,10 +17,10 @@ public final class Store {
         DEFAULTS.put("dragonCount", 18L); DEFAULTS.put("minimumCombined", 1_500_000L);
         DEFAULTS.put("minimumGold", 0L); DEFAULTS.put("minimumElixir", 0L);
         DEFAULTS.put("reserveGold", 1_000_000L); DEFAULTS.put("reserveElixir", 1_000_000L);
-        DEFAULTS.put("maxWallCost", 10_000_000L); DEFAULTS.put("maxWallsPerVisit", 2L);
+        DEFAULTS.put("maxWallCost", 10_000_000L); DEFAULTS.put("maxWallsPerVisit", 20L);
         DEFAULTS.put("targetWallLevel", 0L); DEFAULTS.put("maxAttacks", 30L);
         DEFAULTS.put("maxMinutes", 90L); DEFAULTS.put("maxSkips", 40L);
-        DEFAULTS.put("heroAbilitySeconds", 8L);
+        DEFAULTS.put("heroAbilitySeconds", 8L); DEFAULTS.put("rageSeconds", 4L);
     }
     public Store(Context context) throws Exception {
         directory = context.getFilesDir();
@@ -64,10 +64,10 @@ public final class Store {
             case "maxAttacks" -> 10000;
             case "maxSkips" -> 1000;
             case "maxWallsPerVisit" -> 50;
-            case "heroAbilitySeconds" -> 180;
+            case "heroAbilitySeconds", "rageSeconds" -> 180;
             default -> 100_000_000;
         };
-        boolean zeroAllowed = key.startsWith("minimum") || key.startsWith("reserve") || key.equals("targetWallLevel") || key.equals("heroAbilitySeconds");
+        boolean zeroAllowed = key.startsWith("minimum") || key.startsWith("reserve") || key.equals("targetWallLevel") || key.endsWith("Seconds");
         if (!DEFAULTS.containsKey(key) || value < (zeroAllowed ? 0 : 1) || value > max) {
             throw new IllegalArgumentException("Enter a whole number from " + (zeroAllowed ? 0 : 1) + " to " + max + ".");
         }
@@ -91,7 +91,7 @@ public final class Store {
     public synchronized void selection(Stages.Field field, int[] rect, List<int[]> points, Bitmap frame) throws Exception {
         if (field.optional && rect == null && points.isEmpty()) {
             // Skipped: the farmer leaves this step out.
-            profile.getJSONObject(field.kind.equals("template") ? "templates" : "regions").remove(field.key);
+            profile.getJSONObject(field.kind.startsWith("point") ? "points" : field.kind.equals("template") ? "templates" : "regions").remove(field.key);
             new File(directory, "templates/" + field.key + ".png").delete();
             write("profile.json", profile);
             return;

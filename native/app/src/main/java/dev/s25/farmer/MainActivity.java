@@ -26,6 +26,7 @@ public final class MainActivity extends Activity {
         LABELS.put("targetWallLevel", "Target wall level (0 = any)"); LABELS.put("maxAttacks", "Attack limit");
         LABELS.put("maxMinutes", "Time limit in minutes"); LABELS.put("maxSkips", "Maximum skipped bases");
         LABELS.put("heroAbilitySeconds", "Hero ability delay (seconds after heroes land)");
+        LABELS.put("rageSeconds", "Rage spell delay (seconds after deploying)");
     }
     @Override public void onCreate(Bundle bundle) { super.onCreate(bundle); render(); }
     @Override public void onResume() { super.onResume(); render(); }

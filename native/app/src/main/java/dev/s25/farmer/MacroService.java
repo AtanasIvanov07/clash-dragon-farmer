@@ -21,6 +21,7 @@ public final class MacroService extends AccessibilityService {
     public static final String GAME = "com.supercell.clashofclans";
     private static final String TEST_SCENE = "dev.s25.testscene";
     public static final int DIAGNOSE = -1, ONE_ATTACK = -2, FARM = -3;
+    private static final int HOME_PINCHES = 6;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicInteger epoch = new AtomicInteger();
@@ -288,6 +289,15 @@ public final class MacroService extends AccessibilityService {
         }
         return report.length() == 0 ? "none\n" : report.toString();
     }
+    /** One two-finger pinch toward the middle of the calibrated game window. Farming and Home calibration share it. */
+    private void pinchOut() throws Exception {
+        float l = store.left(), t = store.top(), w = store.width(), h = store.height();
+        Path first = new Path(), second = new Path();
+        first.moveTo(l + w * .25f, t + h * .34f); first.lineTo(l + w * .46f, t + h * .45f);
+        second.moveTo(l + w * .75f, t + h * .66f); second.lineTo(l + w * .54f, t + h * .55f);
+        gesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(first, 0, 350))
+                .addStroke(new GestureDescription.StrokeDescription(second, 0, 350)).build());
+    }
     private void press(int[] point) throws Exception {
         if (!Rules.point(point, store.width(), store.height())) throw new IOException("Tap is outside the game window.");
         Path path = new Path(); path.moveTo(point[0] + store.left(), point[1] + store.top());
@@ -322,6 +332,13 @@ public final class MacroService extends AccessibilityService {
         try {
             checkToken(token);
             if (mode >= 0) {
+                // Wall points are only valid at the zoom the farmer uses after each battle,
+                // so Home is captured after the very same pinch-out.
+                if (mode == 0 && store.width() > 0) {
+                    update("Zooming out like after a battle…");
+                    for (int i = 0; i < HOME_PINCHES; i++) { pinchOut(); pause(100); }
+                    pause(600);
+                }
                 Frame snapshot = capture(false);
                 try {
                     store.dimensions(snapshot);
@@ -345,9 +362,16 @@ public final class MacroService extends AccessibilityService {
                                 report.append(field.key).append(vision.match(f, field.key) == null ? ": not visible\n" : ": MATCH\n");
                             } else if (field.kind.equals("region") && store.rectangle("regions", field.key) != null) {
                                 String value = vision.read(f, field.key);
-                                Number parsed = field.key.equals("dragon_count") ? (Number) Rules.troopCount(value) : Rules.number(value);
-                                report.append(field.key).append(": ").append(value).append(" → ").append(parsed).append('\n');
+                                Number parsed = field.key.equals("dragon_count") ? (Number) Rules.troopCount(value)
+                                        : field.key.equals("home_builders") ? (Number) Rules.freeBuilders(value) : Rules.number(value);
+                                report.append(field.key).append(": ").append(value).append(" → ").append(parsed)
+                                        .append(field.key.equals("home_builders") ? " free builders\n" : "\n");
                             }
+                        }
+                        if (vision.match(f, "home") != null) {
+                            List<int[]> walls = vision.findWalls(f);
+                            report.append("Walls like your picked ones on screen: ").append(walls.size())
+                                    .append(walls.isEmpty() ? " — recapture Home village and tap walls of your lowest level" : "").append('\n');
                         }
                         report.append("Selected wall level: ").append(vision.wall(f));
                         store.saveBitmap("last-diagnostic.png", f.bitmap);
@@ -378,6 +402,12 @@ public final class MacroService extends AccessibilityService {
         p.deployments = store.points("deploy"); p.walls = store.points("walls");
         for (String card : Stages.EXTRA_CARDS) if (store.hasTemplate(card)) p.extras.add(card);
         p.abilitySeconds = (int) store.setting("heroAbilitySeconds");
+        p.rage = store.hasTemplate("rage"); p.ragePoints = store.points("rage_points"); p.rageSeconds = (int) store.setting("rageSeconds");
+        p.checkBuilders = Rules.rect(store.rectangle("regions", "home_builders"), store.width(), store.height());
+        p.batch = store.hasTemplate("wall_more") && store.hasTemplate("batch_add1") && store.hasTemplate("batch_add10")
+                && store.hasTemplate("batch_gold") && store.hasTemplate("batch_elixir")
+                && Rules.rect(store.rectangle("regions", "batch_gold_cost"), store.width(), store.height())
+                && Rules.rect(store.rectangle("regions", "batch_elixir_cost"), store.width(), store.height());
         List<int[]> blank = store.points("home_blank"); if (!blank.isEmpty()) p.blank = blank.get(0);
         return p;
     }
@@ -388,7 +418,12 @@ public final class MacroService extends AccessibilityService {
             @Override public boolean has(Farmer.Screen f, String key) throws Exception { return vision.match((Frame) f, key) != null; }
             @Override public String read(Farmer.Screen f, String key) throws Exception { return vision.read((Frame) f, key); }
             @Override public Integer wall(Farmer.Screen f) throws Exception { return vision.wall((Frame) f); }
-            @Override public int[] find(Farmer.Screen f, String key) throws Exception { return vision.match((Frame) f, key); }
+            @Override public int[] find(Farmer.Screen f, String key) throws Exception {
+                int[] at = vision.card((Frame) f, key);
+                // Shows what the troop bar looked like when a calibrated card was missing.
+                if (at == null) store.saveBitmap("army-cards.png", ((Frame) f).bitmap);
+                return at;
+            }
             @Override public void tap(String key, String... guards) throws Exception {
                 try (Frame f = MacroService.this.capture(true)) {
                     for (String guard : guards) if (vision.match(f, guard) == null) throw new IOException("Screen changed before " + key + ".");
@@ -396,25 +431,47 @@ public final class MacroService extends AccessibilityService {
                     press(p);
                 }
             }
-            @Override public long pay(String resource, long price, long reserve, long cap) throws Exception {
+            @Override public boolean okay(String resource, long total, long balance, long reserve, long cap) throws Exception {
+                try (Frame f = MacroService.this.capture(true)) {
+                    List<com.google.mlkit.vision.text.Text.Line> lines = vision.textLines(f.bitmap);
+                    List<String> text = Vision.texts(lines);
+                    if (!String.join(" ", text).toLowerCase(java.util.Locale.ROOT).contains("selected walls")) return false;
+                    Long asked = Rules.batchDialog(text, resource);
+                    int[] okay = Vision.word(lines, "Okay");
+                    if (asked == null || asked != total || okay == null || !Rules.affordable(balance, total, reserve, cap)) {
+                        store.saveBitmap("upgrade-walls-question.png", f.bitmap);
+                        throw new IOException("Upgrade More asked for " + asked + " " + resource + " (Okay " + (okay == null ? "not found" : "found") + "), expected " + total + ". No payment sent.");
+                    }
+                    // Read again just before tapping: the same question, Okay in the same place.
+                    try (Frame fresh = MacroService.this.capture(true)) {
+                        List<com.google.mlkit.vision.text.Text.Line> again = vision.textLines(fresh.bitmap);
+                        int[] still = Vision.word(again, "Okay");
+                        if (!Long.valueOf(total).equals(Rules.batchDialog(Vision.texts(again), resource)) || still == null
+                                || Math.abs(still[0] - okay[0]) > 20 || Math.abs(still[1] - okay[1]) > 20) {
+                            throw new IOException("Upgrade More's question changed during recognition. No payment sent.");
+                        }
+                        press(still);
+                    }
+                    store.log("batch-okay", total + " " + resource);
+                    return true;
+                }
+            }
+            @Override public void pay(String resource, long price, long balance, long reserve, long cap) throws Exception {
                 try (Frame f = MacroService.this.capture(true)) {
                     String key = "confirm_" + resource;
-                    int[] p = vision.match(f, key);
-                    if (p == null || vision.match(f, "wall_confirm") == null) throw new IOException("Wall confirmation changed before payment.");
-                    Long currentPrice = Rules.number(vision.read(f, key + "_cost"));
-                    Long balance = Rules.number(vision.read(f, "home_" + resource));
-                    if (!Long.valueOf(price).equals(currentPrice) || !Rules.affordable(balance, currentPrice, reserve, cap)) throw new IOException("Final wall price or available resources changed. No payment sent.");
-                    // Re-capture after OCR. Exact comparison of payment-critical crops
-                    // closes the gap between recognizing a price and tapping its button.
+                    if (vision.match(f, key) == null || vision.match(f, "wall_confirm") == null) throw new IOException("Wall confirmation changed before payment.");
+                    // The resource bar behind the dialog is dimmed and partly under its close
+                    // button, so the balance is the one read on Home just before.
+                    if (!Rules.shows(vision.read(f, key + "_cost"), price) || !Rules.affordable(balance, price, reserve, cap)) throw new IOException("Final wall price or available resources changed. No payment sent.");
+                    // Re-capture after OCR. Exact comparison of the price crop closes the
+                    // gap between recognizing a price and tapping its button.
                     try (Frame fresh = MacroService.this.capture(true)) {
                         int[] finalPoint = vision.match(fresh, key);
-                        if (!vision.sameRegion(f, fresh, key + "_cost") || !vision.sameRegion(f, fresh, "home_" + resource)
-                                || finalPoint == null || vision.match(fresh, "wall_confirm") == null) {
+                        if (!vision.sameRegion(f, fresh, key + "_cost") || finalPoint == null || vision.match(fresh, "wall_confirm") == null) {
                             throw new IOException("Payment details changed during recognition. No payment sent.");
                         }
                         press(finalPoint);
                     }
-                    return balance;
                 }
             }
             @Override public void point(int[] p, String guard) throws Exception {
@@ -425,11 +482,16 @@ public final class MacroService extends AccessibilityService {
                 }
             }
             @Override public int burst(List<int[]> points, String... guards) throws Exception {
-                try (Frame f = MacroService.this.capture(true)) {
-                    boolean known = false;
-                    for (String guard : guards) if (vision.match(f, guard) != null) { known = true; break; }
-                    if (!known) throw new IOException("Unknown screen before deployment.");
+                // Troops and spell effects passing behind a button can spoil one frame's match.
+                boolean known = false;
+                for (int look = 0; look < 4 && !known; look++) {
+                    if (look > 0) MacroService.this.pause(250);
+                    try (Frame f = MacroService.this.capture(true)) {
+                        for (String guard : guards) if (store.hasTemplate(guard) && vision.match(f, guard) != null) { known = true; break; }
+                        if (!known && look == 3) store.saveBitmap("unknown-screen.png", f.bitmap);
+                    }
                 }
+                if (!known) throw new IOException("Unknown screen before deployment.");
                 // No screenshot between taps: Android allows only ~3 per second. Each press
                 // still checks the game window, its position and covering windows.
                 int sent = 0;
@@ -441,19 +503,23 @@ public final class MacroService extends AccessibilityService {
             }
             @Override public void pause(long ms) throws Exception { MacroService.this.pause(ms); }
             @Override public void zoom(String guard) throws Exception {
-                for (int i = 0; i < 3; i++) {
+                // Home comes back from a battle zoomed in; extra pinches at full zoom-out do
+                // nothing, so Home always ends at the same zoom as its calibration.
+                for (int i = 0, times = guard.equals("home") ? HOME_PINCHES : 3; i < times; i++) {
                     try (Frame f = MacroService.this.capture(true)) {
                         if (vision.match(f, guard) == null) throw new IOException("Unknown screen before zoom.");
-                        float w = f.width(), h = f.height();
-                        Path first = new Path(), second = new Path();
-                        first.moveTo(f.left + w * .25f, f.top + h * .34f); first.lineTo(f.left + w * .46f, f.top + h * .45f);
-                        second.moveTo(f.left + w * .75f, f.top + h * .66f); second.lineTo(f.left + w * .54f, f.top + h * .55f);
-                        gesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(first, 0, 350))
-                                .addStroke(new GestureDescription.StrokeDescription(second, 0, 350)).build());
                     }
+                    pinchOut();
                     MacroService.this.pause(100);
                 }
                 MacroService.this.pause(400);
+            }
+            @Override public Integer wallCount(Farmer.Screen f) throws Exception { return vision.wallCount((Frame) f); }
+            @Override public List<int[]> walls(Farmer.Screen f) throws Exception {
+                List<int[]> found = vision.findWalls((Frame) f);
+                store.log("walls-found", found.size() + " walls like the picked ones");
+                if (found.isEmpty()) store.saveBitmap("walls-skipped.png", ((Frame) f).bitmap);
+                return found;
             }
             @Override public void status(String s) { update(s); }
             @Override public void log(String event, String detail) { store.log(event, detail); }
@@ -537,7 +603,7 @@ public final class MacroService extends AccessibilityService {
     private List<Rect> tapAreas() {
         List<Rect> areas = new ArrayList<>();
         int l = store.left(), t = store.top(), w = store.width(), h = store.height(), m = dp(12);
-        for (String key : List.of("deploy", "walls", "home_blank")) {
+        for (String key : List.of("deploy", "walls", "home_blank", "rage_points")) {
             for (int[] p : store.points(key)) if (p != null && p.length == 2) areas.add(new Rect(l + p[0] - m, t + p[1] - m, l + p[0] + m, t + p[1] + m));
         }
         for (String key : List.of("home", "find_match", "start_attack", "scout", "result", "wall_gold", "wall_elixir", "confirm_gold", "confirm_elixir")) {
