@@ -555,7 +555,8 @@ public final class MacroService extends AccessibilityService {
             @Override public Integer wallCount(Farmer.Screen f) throws Exception { return vision.wallCount((Frame) f); }
             @Override public List<int[]> walls(Farmer.Screen f) throws Exception {
                 List<int[]> found = vision.findWalls((Frame) f);
-                store.log("walls-found", found.size() + " walls like the picked ones");
+                store.log("walls-found", found.size() + " walls like the picked ones"
+                        + (vision.lastLearned == 0 ? "" : ", " + vision.lastLearned + " of them like the learned level " + vision.lastLearnedLevel + " walls"));
                 if (found.isEmpty()) store.saveBitmap("walls-skipped.png", ((Frame) f).bitmap);
                 return found;
             }
@@ -589,6 +590,13 @@ public final class MacroService extends AccessibilityService {
                 game.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 main.post(() -> { try { startActivity(game); } catch (Exception ignored) {} });
                 MacroService.this.pause(15000);
+            }
+            @Override public void learnWall(int[] point, int level) throws Exception {
+                try (Frame f = MacroService.this.capture(true)) {
+                    if (vision.match(f, "home") == null) { store.log("wall-learn", "Home not visible, nothing kept"); return; }
+                    if (vision.wall(f) != null) { store.log("wall-learn", "a wall is still selected, nothing kept"); return; }
+                    store.log("wall-learn", Arrays.toString(point) + ": " + vision.learnWall(f, point, level));
+                }
             }
             @Override public void save(Farmer.Screen f, String name) {
                 try { store.saveBitmap(name, ((Frame) f).bitmap); } catch (IOException e) { store.log("save-failed", name + ": " + e.getMessage()); }

@@ -147,6 +147,9 @@ public final class Store {
         return list;
     }
     public synchronized void reset() throws Exception {
+        // Wall pictures the app learned belong to this calibration too.
+        File[] learned = new File(directory, "learned-walls").listFiles();
+        if (learned != null) for (File f : learned) f.delete();
         profile = new JSONObject();
         for (String kind : List.of("templates", "regions", "points")) profile.put(kind, new JSONObject());
         write("profile.json", profile);
@@ -193,7 +196,7 @@ public final class Store {
         File[] entries = dir.listFiles(); if (entries == null) return;
         for (File f : entries) {
             String name = prefix + f.getName();
-            if (f.isDirectory() && (name.equals("templates") || name.equals("screens"))) add(z, f, name + "/");
+            if (f.isDirectory() && (name.equals("templates") || name.equals("screens") || name.equals("learned-walls"))) add(z, f, name + "/");
             else if (f.isFile() && (name.endsWith(".png") || name.endsWith(".json") || name.endsWith(".jsonl") || name.endsWith(".txt"))) {
                 z.putNextEntry(new ZipEntry(name)); Files.copy(f.toPath(), z); z.closeEntry();
             }

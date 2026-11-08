@@ -68,8 +68,8 @@ public class FarmerTest {
             if (shiftedVillage || wallsLeft <= 0) return out;
             if (strayCandidate) out.add(new int[] {300, 100});
             if (endlessWalls) levels = new int[] {17, 17}; // plenty more walls at the picked level
-            if (levels[0] == 17 || wrongBuilding || lookAlike) out.add(new int[] {100, 100});
-            if (levels[1] == 17 || wrongBuilding || lookAlike) out.add(new int[] {200, 100});
+            if (levels[0] == 17 || wrongBuilding || lookAlike || learnedLevels.contains(levels[0])) out.add(new int[] {100, 100});
+            if (levels[1] == 17 || wrongBuilding || lookAlike || learnedLevels.contains(levels[1])) out.add(new int[] {200, 100});
             return out;
         }
         @Override public boolean has(Farmer.Screen f, String k) {
@@ -217,6 +217,13 @@ public class FarmerTest {
         }
         @Override public boolean tapWord(String... words) { return false; }
         @Override public void restore() {}
+        /** Pictures kept by the farmer ("level@point"); with {@code learns}, walls of those levels are found too. */
+        List<String> learnedPictures = new ArrayList<>(); Set<Integer> learnedLevels = new HashSet<>(); boolean learns;
+        @Override public void learnWall(int[] point, int level) {
+            try (Farmer.Screen f = capture()) { if (!((Screen) f).state.equals("home")) throw new IllegalStateException("Wall picture taken with a panel open"); }
+            learnedPictures.add(level + "@" + Arrays.toString(point));
+            if (learns) learnedLevels.add(level);
+        }
         List<String> statuses = new ArrayList<>(), events = new ArrayList<>();
         @Override public void status(String text) { statuses.add(text); }
         @Override public void log(String e,String d) { events.add(e + ": " + d); }
@@ -332,6 +339,22 @@ public class FarmerTest {
         assertTrue(e.getMessage().startsWith(Farmer.FAILURES_IN_A_ROW + " attacks in a row failed."));
         assertFalse(s.taps.contains("find_match"));
         assertEquals(Farmer.FAILURES_IN_A_ROW, Collections.frequency(s.taps, "home"));
+    }
+    @Test public void nextWallLevelIsLearnedAndUpgradedWithoutRecalibration() throws Exception {
+        // The picks show level 17. Once both level 17 walls are upgraded, the pictures kept of them at
+        // level 18 find them again on the next visit, so walls go on without a new Home calibration.
+        Sim s = new Sim(); s.learns = true; s.p.maxAttacks = 2;
+        assertEquals("2 attacks and 4 verified wall upgrades.", s.run());
+        assertArrayEquals(new int[] {19, 19}, s.levels);
+        assertEquals(List.of("18@[100, 100]", "18@[200, 100]", "19@[100, 100]", "19@[200, 100]"), s.learnedPictures);
+        // Without learned pictures the second visit finds nothing.
+        Sim old = new Sim(); old.p.maxAttacks = 2;
+        assertTrue(old.run().startsWith("2 attacks and 2 verified wall upgrades. Walls skipped 1×"));
+    }
+    @Test public void noWallPictureIsTakenWhileThePanelStaysOpen() throws Exception {
+        Sim s = new Sim(); s.learns = true; s.wrongDeselect = true;
+        assertEquals("1 attacks and 2 verified wall upgrades.", s.run());
+        assertTrue(s.learnedPictures.isEmpty());
     }
     @Test public void wallsOnlyUpgradesFromHomeWithoutAttacking() throws Exception {
         Sim s = new Sim();

@@ -17,6 +17,12 @@ public final class Vision implements AutoCloseable {
     private boolean warmed;
     private int dragonShift, unreadableShots;
     private List<Template> wallPieces;
+    /** Pieces the app cut itself from walls it upgraded, by their new level (see {@link #learnWall}). */
+    private TreeMap<Integer, List<Template>> learned;
+    /** Walls the last {@link #findWalls} found only through learned pieces, and their level. */
+    public int lastLearned, lastLearnedLevel;
+    private static final String LEARNED = "learned-walls";
+    private static final java.util.regex.Pattern LEARNED_FILE = java.util.regex.Pattern.compile("L(\\d{1,3})-(\\d+)\\.png");
     public Vision(Store store) { this.store = store; }
     /**
      * The wall panel's cream buttons are see-through: the village behind them shows in the button and
@@ -232,39 +238,113 @@ public final class Vision implements AutoCloseable {
     /** A third of a wall piece at the 6-pinch Home zoom (12 px on a 1156 px tall screen): mostly wall, little else. */
     private static int pieceHalf(Frame f) { return Math.max(6, f.height() * 12 / 1156); }
     /**
-     * Centers of walls that look like the picked ones, best first. Skips the side buttons, the
-     * resource bars and the "Unplaced Items"/bottom bar, where a tap would hit the interface.
+     * Centers of walls that look like the picked ones, best first. When fewer than 3 are left (every
+     * wall of the picked level has been upgraded), walls like the pieces learned from upgraded walls
+     * follow, lowest learned level first, so walls go on at the next level without a new calibration.
      */
     public List<int[]> findWalls(Frame f) {
-        List<Template> pieces = wallPieces(f);
+        List<int[]> walls = search(f, wallPieces(f), new ArrayList<>());
+        lastLearned = 0; lastLearnedLevel = 0;
+        if (walls.size() < 3) {
+            for (Map.Entry<Integer, List<Template>> level : learnedPieces(f).entrySet()) {
+                int before = walls.size();
+                search(f, level.getValue(), walls);
+                if (walls.size() > before) { lastLearned = walls.size() - before; lastLearnedLevel = level.getKey(); break; }
+            }
+        }
+        List<int[]> centers = new ArrayList<>();
+        for (int[] w : walls) centers.add(new int[] {w[0], w[1]});
+        return centers;
+    }
+    /**
+     * Appends to {@code walls} the centers {x, y, score} of walls like {@code pieces}, best first, away
+     * from walls already listed. Skips the side buttons, the resource bars and the bottom bar, where a
+     * tap would hit the interface.
+     */
+    private List<int[]> search(Frame f, List<Template> pieces, List<int[]> walls) {
         int[] pixels = f.pixels(); int half = pieceHalf(f);
         // The top band holds the floating STOP control and tall building sprites over the back walls:
         // taps there were blocked or selected something else.
         int minX = f.width() / 10, maxX = f.width() * 85 / 100, minY = f.height() * 16 / 100, maxY = f.height() * 62 / 100;
         List<int[]> coarse = new ArrayList<>();
-        for (Template t : pieces) {
+        for (int i = 0; i < pieces.size(); i++) {
+            Template t = pieces.get(i);
             // A 3 px step skips past most walls of a piece this small; 2 px finds them.
             for (int y = minY; y + t.h <= maxY; y += 2) for (int x = minX; x + t.w <= maxX; x += 2) {
                 double s = score(pixels, f.width(), t, x, y, 0, t.h, 22);
-                if (s >= 0.80) coarse.add(new int[] {x, y, (int) Math.round(s * 1000), pieces.indexOf(t)});
+                if (s >= 0.80) coarse.add(new int[] {x, y, (int) Math.round(s * 1000), i});
             }
         }
         coarse.sort((p, q) -> q[2] - p[2]);
-        List<int[]> walls = new ArrayList<>();
+        List<int[]> found = new ArrayList<>();
         for (int[] c : coarse.subList(0, Math.min(200, coarse.size()))) {
             Template t = pieces.get(c[3]);
             int[] fine = best(f, t, Math.max(minX, c[0] - 2), Math.min(maxX - t.w, c[0] + 2), Math.max(minY, c[1] - 2), Math.min(maxY - t.h, c[1] + 2), 1, 0, t.h, 0.85, 22);
             if (fine == null) continue;
             int cx = fine[0] + t.w / 2, cy = fine[1] + t.h / 2;
             if (cx > f.width() * 72 / 100 && cy < f.height() * 30 / 100) continue; // resource bars
-            boolean near = false;
-            for (int[] w : walls) if (Math.abs(w[0] - cx) < half && Math.abs(w[1] - cy) < half) { near = true; break; }
-            if (!near) walls.add(new int[] {cx, cy, fine[2]});
+            if (near(walls, cx, cy, half) || near(found, cx, cy, half)) continue;
+            found.add(new int[] {cx, cy, fine[2]});
         }
-        walls.sort((p, q) -> q[2] - p[2]);
-        List<int[]> centers = new ArrayList<>();
-        for (int[] w : walls) centers.add(new int[] {w[0], w[1]});
-        return centers;
+        found.sort((p, q) -> q[2] - p[2]);
+        walls.addAll(found);
+        return walls;
+    }
+    private static boolean near(List<int[]> walls, int x, int y, int half) {
+        for (int[] w : walls) if (Math.abs(w[0] - x) < half && Math.abs(w[1] - y) < half) return true;
+        return false;
+    }
+    private TreeMap<Integer, List<Template>> learnedPieces(Frame f) {
+        if (learned != null) return learned;
+        learned = new TreeMap<>();
+        File[] files = new File(store.directory, LEARNED).listFiles();
+        if (files == null) return learned;
+        int size = 2 * pieceHalf(f);
+        for (File file : files) {
+            java.util.regex.Matcher m = LEARNED_FILE.matcher(file.getName());
+            if (!m.matches()) continue;
+            Bitmap b = BitmapFactory.decodeFile(file.getPath());
+            if (b == null) continue;
+            try {
+                // Cut on another screen size: not comparable here.
+                if (b.getWidth() != size || b.getHeight() != size) continue;
+                Template piece = new Template(b);
+                if (piece.wallPiece()) learned.computeIfAbsent(Integer.parseInt(m.group(1)), k -> new ArrayList<>()).add(piece);
+            } finally { b.recycle(); }
+        }
+        return learned;
+    }
+    /**
+     * Keeps a piece of the wall at {@code p} as a picture of {@code level}: cut from a Home screenshot
+     * taken after that wall was upgraded and deselected. Up to 6 different pieces per level are kept, for
+     * the two highest levels only. Returns what happened, for the log.
+     */
+    public String learnWall(Frame f, int[] p, int level) throws IOException {
+        int half = pieceHalf(f);
+        if (p[0] < half || p[1] < half || p[0] + half > f.width() || p[1] + half > f.height()) return "too close to the edge";
+        Bitmap crop = Bitmap.createBitmap(f.bitmap, p[0] - half, p[1] - half, 2 * half, 2 * half);
+        try {
+            Template piece = new Template(crop);
+            if (!piece.wallPiece()) return "mostly grass, not kept";
+            TreeMap<Integer, List<Template>> all = learnedPieces(f);
+            List<Template> same = all.computeIfAbsent(level, k -> new ArrayList<>());
+            for (Template known : same) if (score(piece.pixels, piece.w, known, 0, 0, 0, known.h, 22) >= 0.97) return "level " + level + " piece already known";
+            if (same.size() >= 6) return "6 level " + level + " pieces already known";
+            File dir = new File(store.directory, LEARNED);
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + LEARNED + ".");
+            int n = 0;
+            while (new File(dir, "L" + level + "-" + n + ".png").exists()) n++;
+            store.saveBitmap(LEARNED + "/L" + level + "-" + n + ".png", crop);
+            same.add(piece);
+            // Older levels have been upgraded away: keep the search short.
+            while (all.size() > 2) {
+                int oldest = all.firstKey();
+                File[] files = dir.listFiles();
+                if (files != null) for (File file : files) if (file.getName().startsWith("L" + oldest + "-")) file.delete();
+                all.remove(oldest);
+            }
+            return "kept as level " + level + " piece " + same.size();
+        } finally { crop.recycle(); }
     }
     public List<String> lines(Bitmap bitmap) throws Exception {
         List<String> lines = new ArrayList<>();

@@ -49,6 +49,11 @@ public final class Farmer {
         boolean tapWord(String... words) throws Exception;
         /** Brings Clash back to the front if another app or the launcher took over. */
         void restore() throws Exception;
+        /**
+         * Keeps a picture of the wall at {@code point} (just upgraded, panel closed) as a wall of {@code level},
+         * so the walls of that level are found once the picked level runs out.
+         */
+        void learnWall(int[] point, int level) throws Exception;
     }
     public static final class Plan {
         public long minGold = 0, minElixir = 0, minCombined = 1_500_000;
@@ -375,7 +380,7 @@ public final class Farmer {
             // Clash took exactly the walls' total: they are upgraded and counted now, whatever follows.
             upgraded += count;
             io.log("walls-upgraded", count + " walls, level " + level + " → " + (nextLevel == null ? "?" : nextLevel) + ", " + total + " " + resource);
-            afterUpgrade(level, nextLevel);
+            afterUpgrade(point, level, nextLevel);
             return count;
         }
         if (unreadable) { closePanel(); skipWalls("wall price unreadable, nothing paid"); return -1; }
@@ -394,10 +399,17 @@ public final class Farmer {
      * After a verified payment: an unread or unexpected level is only noted (the deduction already proved
      * the upgrade), and the panel is closed. If it does not close, the next tap simply selects another wall.
      */
-    private void afterUpgrade(int level, Integer nextLevel) throws Exception {
+    private void afterUpgrade(int[] point, int level, Integer nextLevel) throws Exception {
         if (nextLevel == null || nextLevel != level + 1) io.log("wall-level-unconfirmed", "expected level " + (level + 1) + ", read " + nextLevel);
+        boolean closed = true;
         try { deselect(); }
-        catch (IllegalStateException | java.io.IOException e) { io.log("deselect-failed", e.getMessage()); closePanel(); }
+        catch (IllegalStateException | java.io.IOException e) { io.log("deselect-failed", e.getMessage()); closePanel(); closed = false; }
+        // The wall just paid for now shows the next level: a picture of it finds that level's walls
+        // once the picked ones are all upgraded. Only taken from a cleanly closed panel; never fatal.
+        if (!closed) return;
+        try { io.pause(500); io.learnWall(point, level + 1); }
+        catch (InterruptedException e) { throw e; }
+        catch (Exception e) { io.log("wall-learn-failed", message(e)); }
     }
     private int abandonBatch(String reason) throws Exception {
         io.log("batch-abandoned", reason + "; one wall at a time from now on");
@@ -461,7 +473,7 @@ public final class Farmer {
             // Clash took exactly the price: the wall is upgraded and counted now, whatever follows.
             upgraded++;
             io.log("wall-upgraded", resource + " " + price + ", level " + level + " → " + (nextLevel == null ? "?" : nextLevel) + " at " + Arrays.toString(point));
-            afterUpgrade(level, nextLevel);
+            afterUpgrade(point, level, nextLevel);
             return true;
         }
         refusal = unreadable ? "wall price unreadable, nothing paid" : why;
