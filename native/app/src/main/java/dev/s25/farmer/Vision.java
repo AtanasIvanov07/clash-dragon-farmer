@@ -28,9 +28,25 @@ public final class Vision implements AutoCloseable {
         int[] pixels;
         /** Compare only opaque white and black pixels, on a finer grid (see-through buttons). */
         boolean opaqueOnly; int fineStep;
+        /** Compare only the wall's own pixels: the grass around it differs from wall to wall. */
+        boolean wallOnly;
         Template(Bitmap bitmap) {
             w = bitmap.getWidth(); h = bitmap.getHeight(); pixels = new int[w * h];
             bitmap.getPixels(pixels, 0, w, 0, 0, w, h);
+        }
+        private Template(int w, int h, int[] pixels) { this.w = w; this.h = h; this.pixels = pixels; }
+        /** The part [x0, x1) × [y0, y1) of this picture. */
+        Template part(int x0, int y0, int x1, int y1) {
+            int pw = x1 - x0, ph = y1 - y0; int[] p = new int[pw * ph];
+            for (int y = 0; y < ph; y++) System.arraycopy(pixels, (y0 + y) * w + x0, p, y * pw, pw);
+            return new Template(pw, ph, p);
+        }
+        /** False when the piece is mostly grass (a tap beside the wall): too little is left to compare. */
+        boolean wallPiece() {
+            int kept = 0, all = 0;
+            for (int y = 0; y < h; y += Math.max(1, h / 12)) for (int x = 0; x < w; x += Math.max(1, w / 12)) { all++; if (!grass(pixels[y * w + x])) kept++; }
+            wallOnly = true;
+            return kept * 4 >= all;
         }
         void seeThrough() {
             fineStep = Math.max(1, Math.min(w, h) / 40);
@@ -44,6 +60,11 @@ public final class Vision implements AutoCloseable {
         int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
         int min = Math.min(r, Math.min(g, b)), max = Math.max(r, Math.max(g, b));
         return min >= 200 && max - min <= 40 || max <= 60;
+    }
+    /** Village grass: green clearly above red and blue. Walls are purple, grey, gold or stone, never green. */
+    private static boolean grass(int c) {
+        int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+        return g > r + 8 && g > b + 8;
     }
     public static void validateTemplate(Bitmap b) throws IOException {
         long sum = 0, sq = 0; int count = 0;
@@ -85,9 +106,28 @@ public final class Vision implements AutoCloseable {
         int minY = Math.max(0, r[1] - tolerance), maxY = Math.min(f.height() - t.h, r[1] + tolerance);
         int[] rows = steadyRows(key, t);
         int[] at = best(f, t, minX, maxX, minY, maxY, 1, rows[0], rows[1], 0.94, 22);
+        if (at == null) at = withoutBackground(f, key, t, minX, maxX, minY, maxY);
         if (at == null) return null;
         if (key.equals("dragon")) dragonShift = at[0] - r[0];
         return new int[] {at[0] + t.w / 2, at[1] + t.h / 2};
+    }
+    /**
+     * Buttons drawn over the battlefield or the village were captured with a little of that background
+     * at their edges. On another scenery (the dark one) the edges differ and the whole picture scores
+     * 0.91 instead of 0.94+. Only the button itself is compared then: its middle (15 % margins
+     * dropped), or for Home's Battle button its "Battle" label, since a flame crosses the sword after a
+     * battle. Dimmed buttons behind a dialog still fail on colour. Returns the full picture's corner.
+     */
+    private int[] withoutBackground(Frame f, String key, Template t, int minX, int maxX, int minY, int maxY) throws IOException {
+        int x0, y0, x1, y1;
+        switch (key) {
+            case "battle", "scout", "result", "find_match", "start_attack" -> { x0 = t.w * 15 / 100; y0 = t.h * 15 / 100; x1 = t.w - x0; y1 = t.h - y0; }
+            case "home" -> { x0 = t.w * 10 / 100; y0 = t.h * 72 / 100; x1 = t.w - x0; y1 = t.h; }
+            default -> { return null; }
+        }
+        Template part = templates.computeIfAbsent(key + "#button", k -> t.part(x0, y0, x1, y1));
+        int[] at = best(f, part, minX + x0, maxX + x0, minY + y0, maxY + y0, 1, 0, part.h, 0.94, 22);
+        return at == null ? null : new int[] {at[0] - x0, at[1] - y0, at[2]};
     }
     /**
      * Template rows {from, to} that look the same every time. The siege icon animates ("!" / "X").
@@ -98,6 +138,8 @@ public final class Vision implements AutoCloseable {
         return switch (key) {
             case "siege" -> new int[] {t.h * 65 / 100, t.h};
             case "wall_gold", "wall_elixir", "batch_gold", "batch_elixir" -> new int[] {t.h * 25 / 100, t.h};
+            // Its wall icon changes with the wall level; the "Upgrade More" label does not.
+            case "wall_more" -> new int[] {t.h * 55 / 100, t.h};
             case "confirm_gold", "confirm_elixir" -> new int[] {0, t.h * 30 / 100};
             default -> new int[] {0, t.h};
         };
@@ -151,7 +193,7 @@ public final class Vision implements AutoCloseable {
         for (int ty = fromRow; ty < toRow; ty += rowStep) {
             for (int tx = 0; tx < t.w; tx += colStep) {
                 int tc = t.pixels[ty * t.w + tx];
-                if (t.opaqueOnly && !opaque(tc)) continue;
+                if (t.opaqueOnly && !opaque(tc) || t.wallOnly && grass(tc)) continue;
                 int fc = pixels[(y + ty) * width + x + tx];
                 int tg = gray(tc), fg = gray(fc);
                 a += tg; b += fg; aa += tg * tg; bb += fg * fg; ab += tg * fg;
@@ -165,7 +207,8 @@ public final class Vision implements AutoCloseable {
     }
     /**
      * Small pictures of the walls picked in Home calibration, cut from that screenshot. Every wall of
-     * one level looks the same, so they find that level's walls wherever the camera is.
+     * one level looks the same, so they find that level's walls wherever the camera is. Only the wall
+     * is compared: with its grass and neighbours included, a piece matched little but the picked spot.
      */
     private List<Template> wallPieces(Frame f) {
         if (wallPieces != null) return wallPieces;
@@ -178,13 +221,16 @@ public final class Vision implements AutoCloseable {
             for (int[] p : store.points("walls")) {
                 if (p == null || p.length != 2 || p[0] < half || p[1] < half || p[0] + half > home.getWidth() || p[1] + half > home.getHeight()) continue;
                 Bitmap crop = Bitmap.createBitmap(home, p[0] - half, p[1] - half, 2 * half, 2 * half);
-                try { wallPieces.add(new Template(crop)); } finally { if (crop != home) crop.recycle(); }
+                try {
+                    Template piece = new Template(crop);
+                    if (piece.wallPiece()) wallPieces.add(piece);
+                } finally { if (crop != home) crop.recycle(); }
             }
         } finally { home.recycle(); }
         return wallPieces;
     }
-    /** About half a wall piece at the 6-pinch Home zoom (18 px on a 1156 px tall screen). */
-    private static int pieceHalf(Frame f) { return Math.max(8, f.height() * 18 / 1156); }
+    /** A third of a wall piece at the 6-pinch Home zoom (12 px on a 1156 px tall screen): mostly wall, little else. */
+    private static int pieceHalf(Frame f) { return Math.max(6, f.height() * 12 / 1156); }
     /**
      * Centers of walls that look like the picked ones, best first. Skips the side buttons, the
      * resource bars and the "Unplaced Items"/bottom bar, where a tap would hit the interface.
@@ -192,10 +238,13 @@ public final class Vision implements AutoCloseable {
     public List<int[]> findWalls(Frame f) {
         List<Template> pieces = wallPieces(f);
         int[] pixels = f.pixels(); int half = pieceHalf(f);
-        int minX = f.width() / 10, maxX = f.width() * 85 / 100, minY = f.height() * 5 / 100, maxY = f.height() * 62 / 100;
+        // The top band holds the floating STOP control and tall building sprites over the back walls:
+        // taps there were blocked or selected something else.
+        int minX = f.width() / 10, maxX = f.width() * 85 / 100, minY = f.height() * 16 / 100, maxY = f.height() * 62 / 100;
         List<int[]> coarse = new ArrayList<>();
         for (Template t : pieces) {
-            for (int y = minY; y + t.h <= maxY; y += 3) for (int x = minX; x + t.w <= maxX; x += 3) {
+            // A 3 px step skips past most walls of a piece this small; 2 px finds them.
+            for (int y = minY; y + t.h <= maxY; y += 2) for (int x = minX; x + t.w <= maxX; x += 2) {
                 double s = score(pixels, f.width(), t, x, y, 0, t.h, 22);
                 if (s >= 0.80) coarse.add(new int[] {x, y, (int) Math.round(s * 1000), pieces.indexOf(t)});
             }
@@ -222,11 +271,11 @@ public final class Vision implements AutoCloseable {
         for (Text.Line line : textLines(bitmap)) lines.add(line.getText());
         return lines;
     }
-    /** Center of the one line reading exactly {@code word} (ignoring case), or null when there is none or more than one. */
+    /** Center of the one line reading {@code word} (see {@link Rules#buttonWord}), or null when there is none or more than one. */
     public static int[] word(List<Text.Line> lines, String word) {
         int[] found = null;
         for (Text.Line line : lines) {
-            if (!line.getText().trim().equalsIgnoreCase(word) || line.getBoundingBox() == null) continue;
+            if (!Rules.buttonWord(line.getText(), word) || line.getBoundingBox() == null) continue;
             if (found != null) return null;
             found = new int[] {line.getBoundingBox().centerX(), line.getBoundingBox().centerY()};
         }

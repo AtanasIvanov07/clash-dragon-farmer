@@ -20,7 +20,7 @@ public final class MacroService extends AccessibilityService {
     public static MacroService getInstance() { return current.get(); }
     public static final String GAME = "com.supercell.clashofclans";
     private static final String TEST_SCENE = "dev.s25.testscene";
-    public static final int DIAGNOSE = -1, ONE_ATTACK = -2, FARM = -3;
+    public static final int DIAGNOSE = -1, ONE_ATTACK = -2, FARM = -3, WALLS = -4;
     private static final int HOME_PINCHES = 6;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -306,15 +306,16 @@ public final class MacroService extends AccessibilityService {
     public void prepare(int mode) {
         if (busy || store == null) return;
         if (workerRunning) { toast("Previous work is stopping. Try again in a moment."); return; }
-        if (mode < FARM || mode >= Stages.ALL.size()) { toast("Unknown operation."); return; }
+        if (mode < WALLS || mode >= Stages.ALL.size()) { toast("Unknown operation."); return; }
         try { store = new Store(this); } catch (Exception e) { toast("Cannot load saved settings: " + e.getMessage()); return; }
-        if (mode == FARM || mode == ONE_ATTACK) {
+        if (mode == FARM || mode == ONE_ATTACK || mode == WALLS) {
             List<String> missing = store.missing();
             if (!missing.isEmpty()) { toast("Calibrate first: " + String.join(", ", missing)); return; }
         }
         stopped = false; deadline = 0; busy = true;
         int token = epoch.incrementAndGet();
-        String text = mode >= 0 ? Stages.ALL.get(mode).instruction : mode == DIAGNOSE ? "Show the game screen you want to check." : "Open Home with dragons ready and one builder free.";
+        String text = mode >= 0 ? Stages.ALL.get(mode).instruction : mode == DIAGNOSE ? "Show the game screen you want to check."
+                : mode == WALLS ? "Open Home with one builder free. Walls only, no attack." : "Open Home with dragons ready and one builder free.";
         update(text);
         showControl(mode >= 0 || mode == DIAGNOSE ? "CAPTURE" : "START", () -> {
             if (token != epoch.get()) return;
@@ -382,13 +383,16 @@ public final class MacroService extends AccessibilityService {
                 } else {
                     Farmer.Plan plan = plan(); if (mode == ONE_ATTACK) plan.maxAttacks = 1;
                     deadline = SystemClock.elapsedRealtime() + plan.maxMinutes * 60_000L;
-                    store.log("session-start", "native APK; " + plan.maxAttacks + " attacks; " + plan.dragons + " dragons");
-                    String summary = new Farmer(port(vision), plan).run();
+                    store.log("session-start", "native APK " + BuildConfig.VERSION_NAME + "; " + (mode == WALLS ? "walls only" : plan.maxAttacks + " attacks; " + plan.dragons + " dragons"));
+                    Farmer farmer = new Farmer(port(vision), plan);
+                    String summary = mode == WALLS ? farmer.wallsOnly() : farmer.run();
                     complete(token, summary, false);
                 }
             }
-        } catch (Exception e) {
-            try { StringWriter trace = new StringWriter(); e.printStackTrace(new PrintWriter(trace)); store.report("last-error.txt", trace.toString()); } catch (IOException ignored) {}
+        } catch (Throwable e) {
+            // Errors (such as running out of memory) end the session visibly too, instead of
+            // leaving the floating control frozen on its last step.
+            try { StringWriter trace = new StringWriter(); e.printStackTrace(new PrintWriter(trace)); store.report("last-error.txt", trace.toString()); } catch (Throwable ignored) {}
             Throwable cause = e; while (cause instanceof ExecutionException && cause.getCause() != null) cause = cause.getCause();
             complete(token, cause.getMessage() == null ? cause.toString() : cause.getMessage(), true);
         } finally { workerToken.remove(); workerRunning = false; }
@@ -425,36 +429,67 @@ public final class MacroService extends AccessibilityService {
                 return at;
             }
             @Override public void tap(String key, String... guards) throws Exception {
-                try (Frame f = MacroService.this.capture(true)) {
-                    for (String guard : guards) if (vision.match(f, guard) == null) throw new IOException("Screen changed before " + key + ".");
-                    int[] p = vision.match(f, key); if (p == null) throw new IOException("Button changed: " + key);
-                    press(p);
+                // A menu still sliding in (Multiplayer after Home's Battle) can miss one frame's match:
+                // look up to four times before giving up. Nothing is tapped until every guard matches.
+                for (int look = 0; ; look++) {
+                    try (Frame f = MacroService.this.capture(true)) {
+                        boolean ready = true;
+                        for (String guard : guards) if (vision.match(f, guard) == null) { ready = false; break; }
+                        int[] p = ready ? vision.match(f, key) : null;
+                        if (p != null) { press(p); return; }
+                        if (look == 3) throw new IOException(ready ? "Button changed: " + key : "Screen changed before " + key + ".");
+                    }
+                    MacroService.this.pause(300);
                 }
             }
             @Override public boolean okay(String resource, long total, long balance, long reserve, long cap) throws Exception {
                 try (Frame f = MacroService.this.capture(true)) {
                     List<com.google.mlkit.vision.text.Text.Line> lines = vision.textLines(f.bitmap);
-                    List<String> text = Vision.texts(lines);
-                    if (!String.join(" ", text).toLowerCase(java.util.Locale.ROOT).contains("selected walls")) return false;
-                    Long asked = Rules.batchDialog(text, resource);
-                    int[] okay = Vision.word(lines, "Okay");
-                    if (asked == null || asked != total || okay == null || !Rules.affordable(balance, total, reserve, cap)) {
-                        store.saveBitmap("upgrade-walls-question.png", f.bitmap);
-                        throw new IOException("Upgrade More asked for " + asked + " " + resource + " (Okay " + (okay == null ? "not found" : "found") + "), expected " + total + ". No payment sent.");
-                    }
-                    // Read again just before tapping: the same question, Okay in the same place.
-                    try (Frame fresh = MacroService.this.capture(true)) {
-                        List<com.google.mlkit.vision.text.Text.Line> again = vision.textLines(fresh.bitmap);
-                        int[] still = Vision.word(again, "Okay");
-                        if (!Long.valueOf(total).equals(Rules.batchDialog(Vision.texts(again), resource)) || still == null
-                                || Math.abs(still[0] - okay[0]) > 20 || Math.abs(still[1] - okay[1]) > 20) {
-                            throw new IOException("Upgrade More's question changed during recognition. No payment sent.");
-                        }
-                        press(still);
-                    }
-                    store.log("batch-okay", total + " " + resource);
-                    return true;
+                    // Right after an Upgrade More payment button, an Okay/Cancel pair is that question even when its sentence is misread.
+                    if (!Rules.batchQuestion(Vision.texts(lines)) && (Vision.word(lines, "Okay") == null || Vision.word(lines, "Cancel") == null)) return false;
                 }
+                // Clash grows the dialog in (about 8 % larger and Okay ~15 px off while it animates): read it
+                // once it has settled, and tap Okay only after two frames in a row name exactly the total
+                // with Okay in the same place. A wrong amount read twice is cancelled, never paid.
+                MacroService.this.pause(700);
+                Frame last = null; List<com.google.mlkit.vision.text.Text.Line> lastLines = null;
+                Long previous = null; int[] previousOkay = null;
+                try {
+                    for (int read = 0; read < 6; read++) {
+                        if (read > 0) MacroService.this.pause(300);
+                        Frame f = MacroService.this.capture(true);
+                        if (last != null) last.close();
+                        last = f;
+                        List<com.google.mlkit.vision.text.Text.Line> lines = vision.textLines(f.bitmap);
+                        lastLines = lines;
+                        Long asked = Rules.batchDialog(Vision.texts(lines), resource);
+                        int[] okay = Vision.word(lines, "Okay");
+                        if (asked != null && asked.equals(previous) && asked != total)
+                            refuseQuestion(f, lines, "Upgrade More asked for " + asked + " " + resource + ", expected " + total + ".");
+                        if (asked != null && asked == total && okay != null && Long.valueOf(total).equals(previous) && previousOkay != null
+                                && Math.abs(okay[0] - previousOkay[0]) <= 12 && Math.abs(okay[1] - previousOkay[1]) <= 12) {
+                            if (!Rules.affordable(balance, total, reserve, cap)) refuseQuestion(f, lines, "Upgrade More's total " + total + " is not affordable above the reserve.");
+                            press(okay);
+                            store.log("batch-okay", total + " " + resource);
+                            return true;
+                        }
+                        previous = asked; previousOkay = okay;
+                    }
+                    refuseQuestion(last, lastLines, "Upgrade More's question was not read the same twice (last: " + previous + " " + resource
+                            + ", Okay " + (previousOkay == null ? "not found" : "found") + "), expected " + total + ".");
+                    return false;
+                } finally { if (last != null) last.close(); }
+            }
+            /**
+             * Keeps what was read, then closes the question with Cancel (which never pays) so Home comes back
+             * and the walls can go one at a time. Always throws.
+             */
+            private void refuseQuestion(Frame f, List<com.google.mlkit.vision.text.Text.Line> lines, String why) throws Exception {
+                store.saveBitmap("upgrade-walls-question.png", f.bitmap);
+                store.log("batch-question", String.join(" | ", Vision.texts(lines)));
+                int[] cancel = Vision.word(lines, "Cancel");
+                if (cancel != null) { press(cancel); MacroService.this.pause(800); }
+                throw new IOException(why + " No payment sent" + (cancel == null ? "; Cancel not found." : "; question cancelled."));
             }
             @Override public void pay(String resource, long price, long balance, long reserve, long cap) throws Exception {
                 try (Frame f = MacroService.this.capture(true)) {
@@ -506,8 +541,11 @@ public final class MacroService extends AccessibilityService {
                 // Home comes back from a battle zoomed in; extra pinches at full zoom-out do
                 // nothing, so Home always ends at the same zoom as its calibration.
                 for (int i = 0, times = guard.equals("home") ? HOME_PINCHES : 3; i < times; i++) {
-                    try (Frame f = MacroService.this.capture(true)) {
-                        if (vision.match(f, guard) == null) throw new IOException("Unknown screen before zoom.");
+                    // Loot flying into the storages after a battle can spoil one frame's match.
+                    for (int look = 0; ; look++) {
+                        try (Frame f = MacroService.this.capture(true)) { if (vision.match(f, guard) != null) break; }
+                        if (look == 3) throw new IOException("Unknown screen before zoom.");
+                        MacroService.this.pause(300);
                     }
                     pinchOut();
                     MacroService.this.pause(100);
@@ -523,6 +561,38 @@ public final class MacroService extends AccessibilityService {
             }
             @Override public void status(String s) { update(s); }
             @Override public void log(String event, String detail) { store.log(event, detail); }
+            @Override public void back() throws Exception {
+                target(); // only ever inside Clash
+                if (!performGlobalAction(GLOBAL_ACTION_BACK)) throw new IOException("Android refused Back.");
+                store.log("recover-back", "Android Back");
+                MacroService.this.pause(800);
+            }
+            @Override public boolean tapWord(String... words) throws Exception {
+                try (Frame f = MacroService.this.capture(true)) {
+                    List<com.google.mlkit.vision.text.Text.Line> lines = vision.textLines(f.bitmap);
+                    for (String word : words) {
+                        int[] at = Vision.word(lines, word);
+                        if (at == null) continue;
+                        store.log("recover-tap", word);
+                        press(at);
+                        return true;
+                    }
+                }
+                return false;
+            }
+            @Override public void restore() throws Exception {
+                try { target(); return; }
+                catch (IOException e) { if (e.getMessage() == null || !e.getMessage().contains("foreground")) throw e; }
+                Intent game = getPackageManager().getLaunchIntentForPackage(GAME);
+                if (game == null) throw new IOException("Clash of Clans is not installed in this Android profile.");
+                store.log("game-reopened", "Clash was not in front");
+                game.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                main.post(() -> { try { startActivity(game); } catch (Exception ignored) {} });
+                MacroService.this.pause(15000);
+            }
+            @Override public void save(Farmer.Screen f, String name) {
+                try { store.saveBitmap(name, ((Frame) f).bitmap); } catch (IOException e) { store.log("save-failed", name + ": " + e.getMessage()); }
+            }
         };
     }
     public void stopWork(String reason) {

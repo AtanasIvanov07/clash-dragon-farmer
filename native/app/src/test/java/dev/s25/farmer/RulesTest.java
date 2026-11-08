@@ -108,12 +108,62 @@ public class RulesTest {
         assertEquals(Long.valueOf(18_480_000), Rules.batchDialog(List.of("upgrade the selected Walls for 1848OOOO Elixir?"), "elixir"));
         assertNull(Rules.batchDialog(List.of("upgrade the selected Walls for SOD Elixir?"), "elixir"));
     }
+    @Test public void pocoUpgradeMoreQuestionIsUnderstood() {
+        // The question on the Poco F9 Pro: "Do you really want to upgrade the selected / Walls for 16000000 Elixir?".
+        List<String> q = List.of("Upgrade Walls", "Do you really want to upgrade the selected", "Walls for 16000000 Elixir?", "Cancel", "Okay");
+        assertEquals(Long.valueOf(16_000_000), Rules.batchDialog(q, "elixir"));
+        // OCR order across blocks, a lost "?", "EIixir", blocky zeros.
+        assertEquals(Long.valueOf(16_000_000), Rules.batchDialog(List.of("15 990 137", "Okay", "Walls for 16000000 EIixir", "Cancel", "Do you really want to upgrade the selected"), "elixir"));
+        assertEquals(Long.valueOf(16_000_000), Rules.batchDialog(List.of("Do you really want to upgrade the selected", "Walls for I6OOOOOO Elixir!"), "elixir"));
+        assertEquals(Long.valueOf(3_200_000), Rules.batchDialog(List.of("Do you really want to upgrade the selected", "Walls f0r 3200000 Go1d?"), "gold"));
+        assertNull(Rules.batchDialog(List.of("Do you really want to upgrade the selected", "Walls for 16000000 Elixir?"), "gold"));
+        assertNull(Rules.batchDialog(List.of("Walls for 16000000 Elixir?"), "elixir")); // not the question
+        assertTrue(Rules.batchQuestion(q)); assertFalse(Rules.batchQuestion(List.of("Wall (Level 15)x 4", "Upgrade More")));
+        // Exactly what the Poco read at 22:45 (v0.7.10 cancelled it because of "Por").
+        List<String> poco = List.of("226", "Ih 18m", "Batle", "Just asko", "BPEME PA31ENHO", "Do you really want to upgrade the selected",
+                "Walls Por 12000000 Elixir?", "ReMOve", "UPgRade Walls", "Wall", "CaNcel", "Addkiwaiig", "77", "Okay", "AUpgROde", "UpgRade",
+                "4H ZM", "14 338 S21", "14 777 338", "22H 58M", "S00 O00", "5937-", "7H 47M", "SHOP", "5/6 1/2", "Build");
+        assertEquals(Long.valueOf(12_000_000), Rules.batchDialog(poco, "elixir"));
+        assertNull(Rules.batchDialog(poco, "gold"));
+        assertTrue(Rules.buttonWord("CaNcel", "Cancel"));
+        // "for" itself misread, and tabs or line breaks inside one OCR line.
+        assertEquals(Long.valueOf(16_000_000), Rules.batchDialog(List.of("Do you really want to upgrade the selected", "Walls tor 16000000 Elixir?"), "elixir"));
+        assertEquals(Long.valueOf(16_000_000), Rules.batchDialog(List.of("Do you really want to\tupgrade the\nselected Walls for\t16000000 Elixir?"), "elixir"));
+        assertNull(Rules.batchDialog(List.of("Do you really want to upgrade the selected", "19 547 941 Elixir"), "elixir")); // a balance, not the Walls line
+    }
+    @Test public void pocoBuilderCounterAndWallTitlesAreUnderstood() {
+        // 23:12–23:16 on the Poco: "5/6" came back as "576" ten times in a row.
+        assertEquals(Integer.valueOf(5), Rules.freeBuilders("576"));
+        assertEquals(Integer.valueOf(5), Rules.freeBuilders("5/6"));
+        assertEquals(Integer.valueOf(0), Rules.freeBuilders("0 | 6"));
+        assertNull(Rules.freeBuilders("7 6")); assertNull(Rules.freeBuilders("1576"));
+        // The panel title and Clash's small tag over the wall are both read: agreeing levels are one wall.
+        assertEquals(Integer.valueOf(17), Rules.selectedWall(List.of("Wall", "Level 17", "Info", "Wall (Level 17)", "Upgrade")));
+        assertNull(Rules.selectedWall(List.of("Wall (Level 16)", "Wall (Level 17)")));
+        // "x" whose thin 1 was dropped is still the title; the count is just unknown.
+        assertEquals(Integer.valueOf(15), Rules.selectedWall(List.of("Wall (Level 15)x")));
+        assertEquals(Integer.valueOf(6), Rules.selectedWallCount(List.of("Wall", "Level 16", "Wall (Level 16)x 6")));
+    }
+    @Test public void dialogButtonsAreFoundDespiteTheFont() {
+        for (String read : List.of("Okay", "OKAY", "0kay", "Okav", "Ok ay", "Okay."))
+            assertTrue(read, Rules.buttonWord(read, "Okay"));
+        for (String read : List.of("Cancel", "CANCEL", "Cancei", "Cance1"))
+            assertTrue(read, Rules.buttonWord(read, "Cancel"));
+        for (String read : List.of("Cancel", "Ok", "Upgrade", "Okay Cancel", ""))
+            assertFalse(read, Rules.buttonWord(read, "Okay"));
+        assertFalse(Rules.buttonWord("Okay", "Cancel"));
+    }
     @Test public void blockyPriceDigitsAreRead() {
         assertEquals("5 040 000", Vision.priceDigits("S 040 D00"));
         assertEquals("5 040 000", Vision.priceDigits("5 040 00O"));
         assertEquals("1 680 000\nUpgrade", Vision.priceDigits("I 68O OOO\nUpgrade"));
         assertEquals("Upgrade", Vision.priceDigits("Upgrade"));
         assertNull(Rules.batchDialog(List.of("Wall (Level 15)x 11", "Upgrade"), "elixir"));
+    }
+    @Test public void wallPricesReadOnThePocoAreUnderstood() {
+        // Exactly as logged on the Poco F9 Pro, where an older build refused to pay for a selected wall.
+        for (String read : List.of("I600 000", "I600 O00", "1600 OO0", "I 600 OD0", "I600 OD0"))
+            assertEquals(read, Long.valueOf(1_600_000), Rules.number(Vision.onlyNumberLine(Vision.priceDigits(read))));
     }
     @Test public void exactDeductionRequired() {
         assertTrue(Rules.payment(10_000_000L, 8_000_000L, 2_000_000));

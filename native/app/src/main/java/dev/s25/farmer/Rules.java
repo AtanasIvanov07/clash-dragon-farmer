@@ -12,7 +12,8 @@ public final class Rules {
     private static final Pattern NUMBER = Pattern.compile("(?:[0-9]+|[0-9]{1,3}([ ,.'\u00a0\u202f])[0-9]{3}(?:\\1[0-9]{3})*|[0-9]{4}( )[0-9]{3}(?:\\2[0-9]{3})*)");
     // "Wall (Level 15)", or "Wall (Level 15)x 8" while Upgrade More has 8 walls selected. The count's
     // blocky 1 and 0 can come back as I/l and O ("x I" for x 1).
-    private static final Pattern WALL = Pattern.compile("^Wall\\s*\\(?\\s*Level\\s+(\\d{1,2})\\s*\\)?\\s*(?:[xX×]\\s*([0-9OoIl]{1,3}))?$", Pattern.CASE_INSENSITIVE);
+    // A thin "1" after the "x" can be dropped entirely ("Wall (Level 15)x"): still the title, count unknown.
+    private static final Pattern WALL = Pattern.compile("^Wall\\s*\\(?\\s*Level\\s+(\\d{1,2})\\s*\\)?\\s*(?:[xX×]\\s*([0-9OoIl]{1,3})?)?$", Pattern.CASE_INSENSITIVE);
     public static Long number(String text) {
         if (text == null) return null;
         String s = text.trim();
@@ -28,19 +29,65 @@ public final class Rules {
         for (String line : text.split("\n")) if (Long.valueOf(amount).equals(number(line))) return true;
         return false;
     }
-    private static final Pattern BATCH_DIALOG = Pattern.compile("(?i)upgrade\\s+the\\s+selected\\s+walls\\s+for\\s+([0-9OoDIlSB][0-9OoDIlSB ,.'\u00a0\u202f]*[0-9OoDIlSB])\\s+(gold|elixir)\\s*\\?");
+    // "… Walls for 16000000 Elixir?": the amount and the resource word right after "for". Clash's blocky
+    // font comes back with 0/O/D, 1/I/l, 5/S and 8/B mixed up, "Elixir" as "EIixir", the "?" lost.
+    private static final Pattern BATCH_AMOUNT = Pattern.compile("(?i)f[o0]r\\s*([0-9OoDIlSB][0-9OoDIlSB ,.'\\u00a0\\u202f]*[0-9OoDIlSB])\\s*([A-Za-z0-9|!]+)");
+    // The same with "for" itself misread ("tor"): on the question's "Walls … Elixir" line, a number starting with a real digit.
+    private static final Pattern BATCH_AMOUNT_LOOSE = Pattern.compile("(?i)(?<![0-9A-Za-z])([0-9][0-9OoDIlSB ,.'\\u00a0\\u202f]*[0-9OoDIlSB])\\s*([A-Za-z0-9|!]+)");
+    /** Upgrade More's own question ("Do you really want to upgrade the selected Walls for …?") is among these OCR lines. */
+    public static boolean batchQuestion(List<String> lines) {
+        String text = String.join(" ", lines).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+        return text.contains("really want") || text.contains("selected wall");
+    }
     /**
      * Total named by Upgrade More's own question, "Do you really want to upgrade the selected Walls for
      * 18480000 Elixir?", when it asks for {@code resource}; null when the text is not that question or
-     * names the other resource. The question may be split over several OCR lines.
+     * names the other resource. OCR may split the question over lines and return them in any order.
      */
     public static Long batchDialog(List<String> lines, String resource) {
-        Matcher m = BATCH_DIALOG.matcher(String.join(" ", lines).replaceAll("\\s+", " "));
-        if (!m.find() || !m.group(2).equalsIgnoreCase(resource)) return null;
-        // The same blocky-digit misreads as on prices; the amount must still equal the walls' total.
-        String amount = m.group(1).trim();
-        if (!amount.matches(".*[0-9].*")) return null;
-        return number(amount.replaceAll("[OoDd]", "0").replaceAll("[IiLl]", "1").replaceAll("[Ss]", "5").replaceAll("[Bb]", "8"));
+        if (!batchQuestion(lines)) return null;
+        List<String> places = new ArrayList<>(lines);
+        places.add(String.join(" ", lines));
+        for (Pattern pattern : List.of(BATCH_AMOUNT, BATCH_AMOUNT_LOOSE)) {
+            for (String place : places) {
+                if (pattern == BATCH_AMOUNT_LOOSE && !place.toLowerCase(Locale.ROOT).contains("wall")) continue;
+                Matcher m = pattern.matcher(place.replaceAll("\\s+", " "));
+                while (m.find()) {
+                    if (!resource.equals(resourceWord(m.group(2)))) continue;
+                    // The same blocky-digit misreads as on prices; the amount must still equal the walls' total.
+                    String amount = m.group(1).trim();
+                    if (!amount.matches(".*[0-9].*")) continue;
+                    return number(amount.replaceAll("[OoDd]", "0").replaceAll("[IiLl]", "1").replaceAll("[Ss]", "5").replaceAll("[Bb]", "8"));
+                }
+            }
+        }
+        return null;
+    }
+    /** "gold" or "elixir" for that word as OCR reads it ("EIixir", "Go1d"), else null. */
+    static String resourceWord(String word) {
+        String w = word.toLowerCase(Locale.ROOT).replaceAll("[1|!]", "l").replace('0', 'o');
+        if (w.matches("e[li]{1,2}x[li]{1,2}r.*")) return "elixir";
+        if (w.matches("go[li]?d.*")) return "gold";
+        return null;
+    }
+    /**
+     * A button label as OCR reads it in Clash's font ("OKAY", "0kay", "Okav", "Cancei"): case, spaces
+     * and punctuation are ignored, 0 counts as o and 1 as l, and one letter may be off.
+     */
+    public static boolean buttonWord(String read, String word) {
+        if (read == null) return false;
+        String r = read.toLowerCase(Locale.ROOT).replace('0', 'o').replace('1', 'l').replaceAll("[^a-z]", "");
+        String w = word.toLowerCase(Locale.ROOT);
+        if (Math.abs(r.length() - w.length()) > 1) return false;
+        int[] previous = new int[w.length() + 1], current = new int[w.length() + 1];
+        for (int j = 0; j <= w.length(); j++) previous[j] = j;
+        for (int i = 1; i <= r.length(); i++) {
+            current[0] = i;
+            for (int j = 1; j <= w.length(); j++)
+                current[j] = Math.min(Math.min(current[j - 1], previous[j]) + 1, previous[j - 1] + (r.charAt(i - 1) == w.charAt(j - 1) ? 0 : 1));
+            int[] swap = previous; previous = current; current = swap;
+        }
+        return previous[w.length()] <= 1;
     }
     public static Long stable(String a, String b) {
         Long x = number(a), y = number(b);
@@ -54,10 +101,14 @@ public final class Rules {
         return n <= 100 ? n : null;
     }
     private static final Pattern BUILDERS = Pattern.compile("^(\\d{1,2})\\s*/\\s*(\\d{1,2})$");
-    /** Free builders from the home counter, e.g. "1/7" → 1. */
+    // On the Poco the slash comes back as a 7, 1 or bar: "5/6" read as "576". Single digits only, so a
+    // real two-digit count is never split.
+    private static final Pattern BUILDERS_SLASH_MISREAD = Pattern.compile("^(\\d)\\s*[71|lI\\\\]\\s*(\\d)$");
+    /** Free builders from the home counter, e.g. "1/7" → 1, also when OCR turns the slash into a 7 ("576" → 5). */
     public static Integer freeBuilders(String text) {
         if (text == null) return null;
         Matcher m = BUILDERS.matcher(text.trim());
+        if (!m.matches()) m = BUILDERS_SLASH_MISREAD.matcher(text.trim());
         if (!m.matches()) return null;
         int free = Integer.parseInt(m.group(1)), total = Integer.parseInt(m.group(2));
         return total > 0 && free <= total ? free : null;
@@ -78,9 +129,13 @@ public final class Rules {
             Matcher m = i + 1 < lines.size() ? WALL.matcher((lines.get(i) + " " + lines.get(i + 1)).trim()) : null;
             if (m != null && m.matches()) i++;
             else m = WALL.matcher(lines.get(i).trim());
-            if (m.matches()) { titles++; if (m.group(2) != null) found = Integer.parseInt(m.group(2).replaceAll("(?i)o", "0").replaceAll("(?i)[il]", "1")); }
+            if (!m.matches() || m.group(2) == null) continue;
+            // The panel title and Clash's small tag over the wall may both be read: they must agree.
+            int n = Integer.parseInt(m.group(2).replaceAll("(?i)o", "0").replaceAll("(?i)[il]", "1"));
+            if (found != null && found != n) return null;
+            found = n;
         }
-        return titles == 1 ? found : null;
+        return found;
     }
     public static Integer selectedWall(List<String> lines) {
         Integer found = null;
@@ -90,7 +145,8 @@ public final class Rules {
                 n = wallLevel(lines.get(i) + " " + lines.get(i + 1));
                 if (n != null) i++;
             }
-            if (n != null) { if (found != null) return null; found = n; }
+            // The panel title and Clash's small "Wall / Level N" tag over the selected wall both count; they must agree.
+            if (n != null) { if (found != null && !found.equals(n)) return null; found = n; }
         }
         return found;
     }

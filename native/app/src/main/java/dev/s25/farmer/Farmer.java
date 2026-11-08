@@ -30,7 +30,8 @@ public final class Farmer {
         /**
          * Upgrade More's question "upgrade the selected Walls for N Elixir?": false when it is not on screen.
          * Taps Okay once it names exactly {@code total} of {@code resource} and the balance covers it above
-         * the reserve; throws without tapping when it names anything else.
+         * the reserve; when it names anything else (or cannot be read) it never taps Okay: it taps Cancel when it
+         * can, then throws an IOException.
          */
         boolean okay(String resource, long total, long balance, long reserve, long cap) throws Exception;
         void point(int[] point, String guard) throws Exception;
@@ -40,6 +41,14 @@ public final class Farmer {
         void zoom(String guard) throws Exception;
         void status(String text);
         void log(String event, String detail);
+        /** Keeps this screenshot with the exported test details. */
+        void save(Screen screen, String name);
+        /** Android Back inside Clash (closes a popup or answers a question with Cancel). Never used on Home. */
+        void back() throws Exception;
+        /** Taps the one button whose label OCR reads as one of {@code words}; false when there is none. */
+        boolean tapWord(String... words) throws Exception;
+        /** Brings Clash back to the front if another app or the launcher took over. */
+        void restore() throws Exception;
     }
     public static final class Plan {
         public long minGold = 0, minElixir = 0, minCombined = 1_500_000;
@@ -74,10 +83,21 @@ public final class Farmer {
     private final Plan plan;
     private int attacks, upgraded, wallSkips;
     private String wallSkipReason;
+    /** The last walls outcome. It stays on the floating control, under the current step, until walls are checked again. */
+    private String wallNote;
     /** Lowest wall level selected so far this session, and the last wall price read. */
     private Integer lowestWall;
     private long wallPrice;
-    private String preferred = "gold";
+    /** A payment that cannot be accounted for: no more wall spending this session. */
+    static final class SpendingHalted extends IllegalStateException {
+        SpendingHalted(String message) { super(message); }
+    }
+    /** Set after a {@link SpendingHalted}: farming goes on, walls do not. */
+    private boolean wallsOff;
+    /** Why the selected wall was not paid for, shown in the result. */
+    private String refusal;
+    /** Upgrade More failed a check this session; walls go one at a time with the plain Upgrade button. */
+    private boolean batchFailed;
     public Farmer(Port port, Plan plan) { this.io = port; this.plan = plan; plan.validate(); }
     private void require(Screen f, String key) throws Exception {
         if (!io.has(f, key)) throw new IllegalStateException("Expected " + key + ". The screen changed.");
@@ -103,13 +123,19 @@ public final class Farmer {
         // Stored resources count up after a battle and down after a payment, so those get
         // up to ~4 s to settle (an animation never shows the same number twice).
         List<Long> seen = new ArrayList<>();
+        boolean guarded = false;
         for (int read = 0, reads = region.startsWith("home_") ? 10 : 3; read < reads; read++) {
             if (read > 0) io.pause(300);
             Long n;
-            try (Screen f = io.capture()) { require(f, guard); n = Rules.number(io.read(f, region)); }
+            try (Screen f = io.capture()) {
+                // One frame without its guard (a flame over Home's button, a fading dialog) is a missed read.
+                if (!io.has(f, guard)) continue;
+                guarded = true; n = Rules.number(io.read(f, region));
+            }
             if (n != null && seen.contains(n)) return n;
             if (n != null) seen.add(n);
         }
+        if (!guarded) throw new IllegalStateException("Expected " + guard + ". The screen changed.");
         return null;
     }
     /** True once a read of the confirmation shows exactly {@code amount}. During a sale the old price is shown too, crossed out. */
@@ -123,75 +149,134 @@ public final class Farmer {
     private void deselect() throws Exception {
         try (Screen f = io.capture()) {
             require(f, "home");
-            if (io.wall(f) == null) throw new IllegalStateException("Selected-wall title disappeared before deselecting.");
         }
+        if (wallLevel(3, null) == null) throw new IllegalStateException("Selected-wall title disappeared before deselecting.");
         closePanel();
         try (Screen f = io.capture()) {
             if (io.wall(f) != null) throw new IllegalStateException("Empty-ground point did not close the wall panel. Recalibrate it.");
         }
     }
     private void closePanel() throws Exception { io.point(plan.blank, "home"); io.pause(500); waitFor("home", 8); }
-    private void skipWalls(String reason) {
-        wallSkips++; wallSkipReason = reason;
-        io.log("walls-skipped", reason); io.status("Walls skipped: " + reason);
+    /**
+     * A wall step that went wrong ends walls for this visit (for the whole session after a payment that
+     * cannot be accounted for), not the farming: the panel is closed and the next attack starts from Home.
+     * STOP and time limits are interruptions and never land here. If Home cannot be restored, that error
+     * ends the session as before.
+     */
+    private void wallsStopped(Exception e) throws Exception {
+        wallsOff |= e instanceof SpendingHalted;
+        try (Screen f = io.capture()) { io.save(f, "walls-stop.png"); }
+        skipWalls(e.getMessage());
+        closePanel();
     }
+    private void skipWalls(String reason) {
+        wallSkips++; wallSkipReason = reason; wallNote = "Walls skipped: " + reason;
+        io.log("walls-skipped", reason); io.status(wallNote);
+    }
+    private void wallsDone(String reason) { io.log("walls-done", reason); wallNote = "Walls done: " + reason; }
+    /** The current step; the last walls outcome is shown under it so a skipped visit is not hidden by the next attack. */
+    private void status(String text) { io.status(wallNote == null ? text : text + "\n" + wallNote); }
     private Integer freeBuilders() throws Exception {
+        // Right after a battle the counter is often not readable yet (half of the Poco visits failed
+        // within one second): up to ~5 s of reads, and what was read is kept when it never settles.
         List<Integer> seen = new ArrayList<>();
-        for (int read = 0; read < 3; read++) {
-            if (read > 0) io.pause(300);
-            Integer n;
-            try (Screen f = io.capture()) { require(f, "home"); n = Rules.freeBuilders(io.read(f, "home_builders")); }
+        List<String> texts = new ArrayList<>();
+        for (int read = 0; read < 10; read++) {
+            if (read > 0) io.pause(400);
+            String text;
+            try (Screen f = io.capture()) { if (!io.has(f, "home")) continue; text = io.read(f, "home_builders"); }
+            Integer n = Rules.freeBuilders(text);
             if (n != null && seen.contains(n)) return n;
             if (n != null) seen.add(n);
+            texts.add(text == null ? "null" : "\"" + text.replace('\n', '/') + "\"");
         }
+        io.log("builders-unreadable", String.join(", ", texts));
         return null;
+    }
+    /**
+     * The selected wall's level from up to {@code reads} captures: OCR of the small title misses now and
+     * then. Returns {@code want} as soon as it is read, else the last level read, else null.
+     */
+    private Integer wallLevel(int reads, Integer want) throws Exception {
+        Integer last = null;
+        for (int read = 0; read < reads; read++) {
+            if (read > 0) io.pause(300);
+            Integer n;
+            try (Screen f = io.capture()) { n = io.wall(f); }
+            if (n != null && (want == null || n.equals(want))) return n;
+            if (n != null) last = n;
+        }
+        return last;
     }
     private void walls() throws Exception {
         if (!plan.wallsEnabled) return;
-        io.status("Checking walls");
+        wallNote = null;
+        // Each visit starts fresh: a lower level seen on an earlier visit, or one Upgrade More misread,
+        // must not block the walls that are on screen now.
+        lowestWall = null; batchFailed = false;
+        status("Checking walls");
         waitFor("home", 8);
         // Walls need a free builder; otherwise Clash offers to finish an upgrade with gems.
+        Integer free = null;
         if (plan.checkBuilders) {
-            Integer free = freeBuilders();
-            if (free == null) { skipWalls("builder counter unreadable"); return; }
-            if (free == 0) { skipWalls("no free builder"); return; }
+            status("Checking walls: free builders");
+            free = freeBuilders();
+            if (free == null) { skipWalls("builder counter unreadable (recalibrate the builder counter)"); return; }
+            if (free == 0) { skipWalls("no free builder (a wall upgrade needs an idle builder)"); return; }
         }
         io.pause(600); // let Clash's zoom animation settle
         // Walls are found by how they look (like the ones picked in calibration), so the camera
         // position does not matter. An upgraded wall looks different and drops out of the search.
-        for (int paidThisVisit = 0; paidThisVisit < plan.wallsPerVisit; ) {
+        int paidThisVisit = 0;
+        while (paidThisVisit < plan.wallsPerVisit) {
             waitFor("home", 8);
+            status("Checking walls: gold and elixir");
             Long gold = number("home_gold", "home"), elixir = number("home_elixir", "home");
-            if (gold == null || elixir == null) { skipWalls("stored resources unreadable"); return; }
+            io.log("walls-check", "gold " + gold + ", elixir " + elixir + (free == null ? "" : ", free builders " + free));
+            if (gold == null || elixir == null) { skipWalls("stored gold or elixir unreadable"); return; }
             // Every wall of one level costs the same: below that price on both resources, this visit is done.
             if (wallPrice > 0 && !Rules.affordable(gold, wallPrice, plan.reserveGold, plan.maxWallCost)
-                    && !Rules.affordable(elixir, wallPrice, plan.reserveElixir, plan.maxWallCost)) { io.log("walls-done", "gold and elixir are at their reserves"); return; }
+                    && !Rules.affordable(elixir, wallPrice, plan.reserveElixir, plan.maxWallCost)) { wallsDone("gold and elixir are at their reserves"); return; }
+            status("Checking walls: looking for walls");
             List<int[]> found;
             try (Screen f = io.capture()) { require(f, "home"); found = io.walls(f); }
+            // The first wall read is taken: going back to a wall after tapping others is unreliable (a
+            // second tap on a crowded spot can select a neighbour). A lower wall found later is taken
+            // next and from then on sets the level; walls already at the target level are passed over.
             int[] point = null; Integer level = null;
-            for (int[] candidate : found.subList(0, Math.min(5, found.size()))) {
+            boolean reachedTarget = false;
+            List<int[]> tries = found.subList(0, Math.min(8, found.size()));
+            for (int[] candidate : tries) {
+                status("Checking walls: tapping wall " + (tries.indexOf(candidate) + 1) + " of " + tries.size() + " found");
                 io.point(candidate, "home"); io.pause(600);
-                Integer seen;
-                try (Screen f = io.capture()) { seen = io.wall(f); }
-                if (seen != null && plan.targetWallLevel > 0 && seen >= plan.targetWallLevel) {
-                    deselect(); io.log("walls-done", "walls reached the target level " + plan.targetWallLevel); return;
-                }
-                if (seen != null && (lowestWall == null || seen <= lowestWall)) { point = candidate; level = seen; break; }
+                Integer seen = wallLevel(2, null);
+                boolean finished = seen != null && plan.targetWallLevel > 0 && seen >= plan.targetWallLevel;
+                reachedTarget |= finished;
+                if (seen != null && !finished && (lowestWall == null || seen <= lowestWall)) { point = candidate; level = seen; break; }
                 io.log("wall-miss", Arrays.toString(candidate) + (seen == null ? " is not a wall" : " is wall level " + seen));
                 closePanel();
             }
             if (point == null) {
-                if (paidThisVisit == 0) skipWalls(found.isEmpty() ? "no wall like the picked ones on screen" : "no wall of the picked level could be selected");
-                else io.log("walls-done", "no more walls of level " + lowestWall + " visible");
+                if (reachedTarget) wallsDone("walls reached the target level " + plan.targetWallLevel);
+                else if (paidThisVisit == 0) skipWalls(found.isEmpty() ? "no wall like the picked ones on screen (recapture Home village and tap walls of your lowest level)" : "none of the " + tries.size() + " spots tapped selected a wall" + (lowestWall == null ? "" : " of level " + lowestWall + " or lower"));
+                else wallsDone(paidThisVisit + " upgraded; no more walls of level " + lowestWall + " visible");
                 return;
             }
             lowestWall = level; // stay on the lowest level; higher walls wait until it is finished
-            int paid = plan.batch ? upgradeBatch(point, level, gold, elixir, plan.wallsPerVisit - paidThisVisit)
+            int paid = plan.batch && !batchFailed ? upgradeBatch(point, level, gold, elixir, plan.wallsPerVisit - paidThisVisit)
                     : upgradeSelected(point, level, gold, elixir) ? 1 : 0;
-            if (paid < 0) return; // batch check failed: panel closed, nothing paid
-            if (paid == 0) { deselect(); return; }
+            if (paid < 0 && batchFailed) continue; // Upgrade More misbehaved, nothing paid: one wall at a time from now on
+            if (paid < 0) return; // price unreadable: panel closed, nothing paid
+            if (paid == 0) {
+                // A wall is selected but nothing was paid: keep the screen that shows why.
+                try (Screen f = io.capture()) { io.save(f, "walls-stop.png"); }
+                deselect();
+                if (paidThisVisit == 0) skipWalls(refusal); else wallsDone(paidThisVisit + " upgraded; " + refusal);
+                return;
+            }
             paidThisVisit += paid;
         }
+        wallsDone(paidThisVisit + " upgraded (your maximum per visit)");
     }
     private Integer selectedCount() throws Exception {
         Integer seen = null;
@@ -211,8 +296,9 @@ public final class Farmer {
      * failed and the batch was abandoned without paying.
      */
     private int upgradeBatch(int[] point, int level, long gold, long elixir, int limit) throws Exception {
-        List<String> resources = preferred.equals("gold") ? List.of("gold", "elixir") : List.of("elixir", "gold");
+        List<String> resources = resources(gold, elixir);
         boolean unreadable = false;
+        refusal = "no gold or elixir Upgrade button recognized (recapture Selected wall)";
         for (String resource : resources) {
             String button = "wall_" + resource;
             try (Screen f = io.capture()) { if (!io.has(f, button)) continue; }
@@ -220,9 +306,13 @@ public final class Farmer {
             // Nothing is open yet but the wall panel: the other resource may still be readable.
             if (unit == null) { unreadable = true; io.log("price-unreadable", resource + " wall price"); continue; }
             wallPrice = unit;
-            long balance = resource.equals("gold") ? gold : elixir;
+            // Read now, with the wall selected: a spot tapped earlier that was not a wall may have been a
+            // collector, and collecting it changed the balance read at the start of the visit.
+            Long fresh = number("home_" + resource, "home");
+            if (fresh == null) { refusal = "stored " + resource + " unreadable with the wall selected"; continue; }
+            long balance = fresh;
             long reserve = resource.equals("gold") ? plan.reserveGold : plan.reserveElixir;
-            if (!Rules.affordable(balance, unit, reserve, plan.maxWallCost)) continue;
+            if (!Rules.affordable(balance, unit, reserve, plan.maxWallCost)) { refusal = unaffordable(unit); continue; }
             int want = (int) Math.min(limit, (balance - reserve) / unit);
             if (want < 2) return upgradeSelected(point, level, gold, elixir) ? 1 : 0;
             io.status("Selecting " + want + " walls (level " + level + ")");
@@ -251,7 +341,18 @@ public final class Farmer {
             // Upgrade More asks its own question with Cancel / Okay; the single-wall dialog may follow.
             boolean answered = false;
             for (long until = io.now() + 8000; ; io.pause(250)) {
-                if (!answered && io.okay(resource, total, balance, reserve, count * plan.maxWallCost)) { answered = true; until = io.now() + 8000; continue; }
+                if (!answered) {
+                    boolean okay;
+                    try { okay = io.okay(resource, total, balance, reserve, count * plan.maxWallCost); }
+                    catch (java.io.IOException e) {
+                        // Nothing was paid. Once the question is cancelled and Home is back, the walls go one at a time.
+                        boolean back;
+                        try (Screen f = io.capture()) { back = io.has(f, "home") && !io.has(f, "wall_confirm"); }
+                        if (back) return abandonBatch(e.getMessage());
+                        throw e;
+                    }
+                    if (okay) { answered = true; until = io.now() + 8000; continue; }
+                }
                 try (Screen f = io.capture()) {
                     if (io.has(f, "wall_confirm") || answered && io.has(f, "home")) break;
                 }
@@ -267,44 +368,85 @@ public final class Farmer {
             }
             io.pause(1200); waitFor("home", 8);
             // The first selected wall is always part of the batch: it must now be one level higher.
-            closePanel();
-            io.point(point, "home"); io.pause(600);
-            Integer nextLevel;
-            try (Screen f = io.capture()) { nextLevel = io.wall(f); }
-            if (nextLevel == null || nextLevel != level + 1) throw new IllegalStateException("Wall level did not advance as expected.");
-            deselect();
+            Integer nextLevel = upgradedLevel(point, level);
+            // The deduction first: a payment that does not add up stops wall spending for the session.
             Long after = number("home_" + resource, "home");
-            if (!Rules.payment(balance, after, total)) throw new IllegalStateException("Resource deduction could not be verified. No further spending.");
-            preferred = resource.equals("gold") ? "elixir" : "gold";
+            verifyPayment(resource, balance, after, total);
+            // Clash took exactly the walls' total: they are upgraded and counted now, whatever follows.
             upgraded += count;
-            io.log("walls-upgraded", count + " walls, level " + level + " → " + nextLevel + ", " + total + " " + resource);
+            io.log("walls-upgraded", count + " walls, level " + level + " → " + (nextLevel == null ? "?" : nextLevel) + ", " + total + " " + resource);
+            afterUpgrade(level, nextLevel);
             return count;
         }
         if (unreadable) { closePanel(); skipWalls("wall price unreadable, nothing paid"); return -1; }
         return 0;
     }
+    /**
+     * The balance must have dropped by exactly the amount paid. An unreadable balance stops walls for this
+     * visit; a wrong amount stops wall spending for the whole session.
+     */
+    private void verifyPayment(String resource, long before, Long after, long paid) {
+        if (after == null) throw new IllegalStateException("Stored " + resource + " unreadable after paying " + paid + "; walls stop for this visit.");
+        if (!Rules.payment(before, after, paid))
+            throw new SpendingHalted("Resource deduction could not be verified (" + resource + " " + before + " - " + paid + " is not " + after + "). No further spending.");
+    }
+    /**
+     * After a verified payment: an unread or unexpected level is only noted (the deduction already proved
+     * the upgrade), and the panel is closed. If it does not close, the next tap simply selects another wall.
+     */
+    private void afterUpgrade(int level, Integer nextLevel) throws Exception {
+        if (nextLevel == null || nextLevel != level + 1) io.log("wall-level-unconfirmed", "expected level " + (level + 1) + ", read " + nextLevel);
+        try { deselect(); }
+        catch (IllegalStateException | java.io.IOException e) { io.log("deselect-failed", e.getMessage()); closePanel(); }
+    }
     private int abandonBatch(String reason) throws Exception {
-        io.log("batch-abandoned", reason);
+        io.log("batch-abandoned", reason + "; one wall at a time from now on");
+        io.status("Upgrade More check failed, nothing paid. Upgrading one wall at a time.");
+        batchFailed = true;
         closePanel();
-        skipWalls("Upgrade More check failed, nothing paid");
         return -1;
     }
-    /** Upgrades the selected wall with whichever resource is preferred and affordable; false if neither is. */
+    private String unaffordable(long price) {
+        return price > plan.maxWallCost ? "wall price " + price + " is above your maximum wall cost"
+                : "not enough gold or elixir above your reserves for a " + price + " wall";
+    }
+    /**
+     * The resource with more to spend above its reserve pays first; the other one is tried if it cannot.
+     * Spending one resource makes the other the bigger budget, so payments alternate on their own.
+     */
+    private List<String> resources(long gold, long elixir) {
+        return gold - plan.reserveGold >= elixir - plan.reserveElixir ? List.of("gold", "elixir") : List.of("elixir", "gold");
+    }
+    /**
+     * The paid wall's level. It is read where the wall is still selected; when Clash has deselected it or
+     * not redrawn its title yet, the panel is closed and the wall selected again.
+     */
+    private Integer upgradedLevel(int[] point, int level) throws Exception {
+        try (Screen f = io.capture()) { require(f, "home"); }
+        Integer now = wallLevel(4, level + 1);
+        if (now != null && now == level + 1) return now;
+        closePanel();
+        io.point(point, "home"); io.pause(600);
+        return wallLevel(3, level + 1);
+    }
+    /** Upgrades the selected wall with whichever resource has more to spend and is affordable; false if neither is. */
     private boolean upgradeSelected(int[] point, int level, long gold, long elixir) throws Exception {
-        List<String> resources = preferred.equals("gold") ? List.of("gold", "elixir") : List.of("elixir", "gold");
+        List<String> resources = resources(gold, elixir);
         boolean unreadable = false;
+        String why = "no gold or elixir Upgrade button recognized (recapture Selected wall)";
         for (String resource : resources) {
             String button = "wall_" + resource;
             try (Screen f = io.capture()) { if (!io.has(f, button)) continue; }
             Long price = number(button + "_cost", button);
             if (price == null) { unreadable = true; io.log("price-unreadable", resource + " wall price"); continue; }
             wallPrice = price;
-            long balance = resource.equals("gold") ? gold : elixir;
+            // Read now, with the wall selected (see upgradeBatch): the deduction is checked against this.
+            Long fresh = number("home_" + resource, "home");
+            if (fresh == null) { why = "stored " + resource + " unreadable with the wall selected"; continue; }
+            long balance = fresh;
             long reserve = resource.equals("gold") ? plan.reserveGold : plan.reserveElixir;
-            if (!Rules.affordable(balance, price, reserve, plan.maxWallCost)) continue;
-            try (Screen f = io.capture()) {
-                if (!Integer.valueOf(level).equals(io.wall(f))) throw new IllegalStateException("Selected wall changed.");
-            }
+            if (!Rules.affordable(balance, price, reserve, plan.maxWallCost)) { why = unaffordable(price); continue; }
+            if (!Integer.valueOf(level).equals(wallLevel(3, level))) throw new IllegalStateException("Selected wall changed.");
             io.tap(button, "home", button);
             waitFor("wall_confirm", 6);
             String confirm = "confirm_" + resource;
@@ -312,28 +454,21 @@ public final class Farmer {
             io.status("Wall: " + price + " " + resource);
             io.pay(resource, price, balance, reserve, plan.maxWallCost);
             waitGone("wall_confirm", 8); io.pause(1200);
-            Integer nextLevel;
-            try (Screen f = io.capture()) { require(f, "home"); nextLevel = io.wall(f); }
-            if (nextLevel == null) {
-                // Some game flows deselect after an upgrade. Re-select the same
-                // wall and verify its new level before counting it.
-                io.point(point, "home"); io.pause(600);
-                try (Screen f = io.capture()) { nextLevel = io.wall(f); }
-            }
-            if (nextLevel == null || nextLevel != level + 1) throw new IllegalStateException("Wall level did not advance as expected.");
-            deselect();
+            Integer nextLevel = upgradedLevel(point, level);
+            // The deduction first: a payment that does not add up stops wall spending for the session.
             Long after = number("home_" + resource, "home");
-            if (!Rules.payment(balance, after, price)) throw new IllegalStateException("Resource deduction could not be verified. No further spending.");
-            preferred = resource.equals("gold") ? "elixir" : "gold";
+            verifyPayment(resource, balance, after, price);
+            // Clash took exactly the price: the wall is upgraded and counted now, whatever follows.
             upgraded++;
-            io.log("wall-upgraded", resource + " " + price + ", level " + level + " → " + nextLevel + " at " + Arrays.toString(point));
+            io.log("wall-upgraded", resource + " " + price + ", level " + level + " → " + (nextLevel == null ? "?" : nextLevel) + " at " + Arrays.toString(point));
+            afterUpgrade(level, nextLevel);
             return true;
         }
-        if (unreadable) skipWalls("wall price unreadable, nothing paid");
+        refusal = unreadable ? "wall price unreadable, nothing paid" : why;
         return false;
     }
     private void attack() throws Exception {
-        io.status("Finding an opponent"); waitFor("home", 10); io.tap("home", "home");
+        status("Finding an opponent"); waitFor("home", 10); io.tap("home", "home");
         waitFor("find_match", 10); io.tap("find_match", "find_match");
         // Find a Match opens the army screen; its Attack! button starts the search.
         waitFor("start_attack", 15); io.tap("start_attack", "start_attack");
@@ -348,7 +483,7 @@ public final class Farmer {
                 io.log("scout", "loot unreadable, skipping base; " + skip + " skips");
             } else {
                 unreadable = 0;
-                io.status("Loot: " + gold + " gold / " + elixir + " elixir");
+                status("Loot: " + gold + " gold / " + elixir + " elixir");
                 io.log("scout", gold + " gold, " + elixir + " elixir, " + skip + " skips");
                 if (Rules.loot(gold, elixir, plan.minGold, plan.minElixir, plan.minCombined)) { accepted = true; break; }
             }
@@ -387,7 +522,7 @@ public final class Farmer {
         while (remaining > target) {
             List<int[]> burst = new ArrayList<>();
             for (int i = remaining - target; i > 0; i--) burst.add(plan.deployments.get(next++ % plan.deployments.size()));
-            io.status("Deploying " + burst.size() + " dragons");
+            status("Deploying " + burst.size() + " dragons");
             int sent = io.burst(burst, "scout", "battle");
             io.pause(400);
             Integer left = dragonsLeft(remaining, target);
@@ -413,7 +548,7 @@ public final class Farmer {
             int[] at = cards.get(card);
             if (at == null) { io.log("extra-skipped", card + " not in this army"); continue; }
             try (Screen f = io.capture()) { if (io.has(f, "result")) break; }
-            io.status("Deploying " + card.replace('_', ' '));
+            status("Deploying " + card.replace('_', ' '));
             // A selected card hides the battle button's match. Cards still waiting in the
             // troop bar prove the battle screen just as well.
             List<String> guards = new ArrayList<>(List.of("battle", "scout"));
@@ -430,7 +565,7 @@ public final class Farmer {
             io.log("deployed", card);
             if (card.startsWith("hero_")) abilities.put(card, at);
         }
-        io.status("Waiting for battle results");
+        status("Waiting for battle results");
         long until = io.now() + 240_000, abilityAt = io.now() + plan.abilitySeconds * 1000L, rageAt = io.now() + plan.rageSeconds * 1000L;
         boolean rage = plan.rage && !plan.ragePoints.isEmpty();
         while (true) {
@@ -446,7 +581,7 @@ public final class Farmer {
     /** Selects the rage card and drops one spell on each marked point, in front of the army. */
     private void castRage(int[] card) throws Exception {
         if (card == null) { io.log("rage-skipped", "rage card not in this army"); return; }
-        io.status("Rage spells");
+        status("Rage spells");
         try {
             io.burst(List.of(card), "battle"); io.pause(150);
             io.log("rage", io.burst(plan.ragePoints, "battle") + " spells dropped");
@@ -454,7 +589,7 @@ public final class Farmer {
     }
     /** Taps each deployed hero's card again. A failed check is retried; one hero failing never skips the others. */
     private void useAbilities(Map<String, int[]> heroes) throws Exception {
-        io.status("Hero abilities");
+        status("Hero abilities");
         for (Map.Entry<String, int[]> hero : heroes.entrySet()) {
             for (int attempt = 0; ; attempt++) {
                 try { io.point(hero.getValue(), "battle"); io.log("ability", hero.getKey()); io.pause(150); break; }
@@ -470,12 +605,18 @@ public final class Farmer {
     /** Dragons still in the card, from two agreeing reads within [target, remaining]; -1 once the battle result shows; null if unreadable. */
     private Integer dragonsLeft(int remaining, int target) throws Exception {
         Integer previous = null;
+        int unknown = 0;
         for (int read = 0; read < 5; read++) {
             if (read > 0) io.pause(200);
             Integer n;
             try (Screen f = io.capture()) {
                 if (io.has(f, "result")) return -1;
-                if (!io.has(f, "scout") && !io.has(f, "battle")) throw new IllegalStateException("Unknown screen during deployment.");
+                // Dragons flying over the battle button can spoil one frame's match; only a screen
+                // that stays unknown for every read ends the attack.
+                if (!io.has(f, "scout") && !io.has(f, "battle")) {
+                    if (++unknown == 5) throw new IllegalStateException("Unknown screen during deployment.");
+                    previous = null; continue;
+                }
                 n = Rules.troopCount(io.read(f, "dragon_count"));
             }
             if (n != null && (n < target || n > remaining)) n = null;
@@ -484,12 +625,95 @@ public final class Farmer {
         }
         return null;
     }
+    /** Attacks in a row that may fail, each followed by a recovery to Home, before a session gives up. */
+    static final int FAILURES_IN_A_ROW = 5;
     public String run() throws Exception {
         long end = io.now() + plan.maxMinutes * 60_000L;
-        while (attacks < plan.maxAttacks && io.now() < end) {
-            attack(); walls();
-            io.status(attacks + " attacks / " + upgraded + " walls");
+        int failures = 0;
+        try {
+            while (attacks < plan.maxAttacks && io.now() < end) {
+                try { attack(); failures = 0; }
+                catch (InterruptedException e) { throw e; }
+                catch (Exception e) {
+                    // An unexpected screen during one attack must not end a night of farming: get back
+                    // to Home and go on. Only a problem that keeps coming back ends the session.
+                    if (++failures >= FAILURES_IN_A_ROW) throw new IllegalStateException(failures + " attacks in a row failed. Last: " + message(e), e);
+                    io.log("attack-failed", message(e) + " (" + failures + " in a row); getting back to Home");
+                    try (Screen f = io.capture()) { io.save(f, "attack-failed-" + failures + ".png"); }
+                    catch (InterruptedException x) { throw x; } catch (Exception ignored) {}
+                    if (!recover(message(e))) continue;
+                }
+                if (!wallsOff) visitWalls();
+                status(attacks + " attacks / " + upgraded + " walls");
+            }
+        } catch (Exception e) {
+            // STOP or an error: what was done so far still goes into the log for Read last result.
+            io.log("session-summary", summary() + " Ended by: " + e.getMessage());
+            throw e;
         }
+        return summary();
+    }
+    /**
+     * Only the wall part, from Home, without an attack first: a quick way to test wall upgrading.
+     * The same visit as after a battle (zoom, builders, resources, walls), once.
+     */
+    public String wallsOnly() throws Exception {
+        if (!plan.wallsEnabled) return "Walls are switched off in the settings.";
+        try {
+            status("Walls only: zooming out"); waitFor("home", 10); io.zoom("home");
+            visitWalls();
+        } catch (Exception e) {
+            io.log("session-summary", "walls only: " + upgraded + " verified wall upgrades. Ended by: " + e.getMessage());
+            throw e;
+        }
+        return "Walls only: " + upgraded + " verified wall upgrades." + (wallNote == null ? "" : " " + wallNote + ".");
+    }
+    /** One walls visit. Whatever goes wrong in it ends the visit, never the session (STOP and time limits aside). */
+    private void visitWalls() throws Exception {
+        try { walls(); }
+        catch (InterruptedException e) { throw e; }
+        catch (Exception e) {
+            try { wallsStopped(e); }
+            catch (InterruptedException again) { throw again; }
+            catch (Exception again) { recover("walls: " + message(again)); }
+        }
+    }
+    /**
+     * Back to Home without spending anything, after a failed attack or wall step. A battle is waited out
+     * (its result's Return Home tapped), a popup or question is closed with Back or its Reload / Try Again
+     * / Close button, and Clash is brought back to the front. Okay, prices and confirm buttons are never
+     * tapped here. True once Home is back (zoomed out like after a battle); false after 8 minutes.
+     */
+    private boolean recover(String why) throws Exception {
+        status("Recovering: " + why);
+        long until = io.now() + 8 * 60_000L;
+        for (int unknown = 0; io.now() < until; io.pause(2500)) {
+            try {
+                io.restore();
+                boolean home, result, fighting;
+                try (Screen f = io.capture()) {
+                    home = io.has(f, "home");
+                    result = !home && io.has(f, "result");
+                    fighting = !home && !result && (io.has(f, "battle") || io.has(f, "scout"));
+                }
+                if (home) {
+                    io.zoom("home");
+                    io.log("recovered", "back on Home after: " + why); status("Back on Home");
+                    return true;
+                }
+                if (result) { io.tap("result", "result"); continue; }
+                if (fighting) { status("Recovering: waiting for the battle to end"); unknown = 0; continue; }
+                // A popup, a question, a menu or a lost connection: Back closes most; Reload needs its button.
+                if (++unknown % 2 == 0 && !io.tapWord("Reload", "Try Again", "Return Home", "Close")) io.back();
+            }
+            catch (InterruptedException e) { throw e; }
+            catch (Exception e) { io.log("recover-step", message(e)); }
+        }
+        io.log("recover-failed", "Home did not come back within 8 minutes after: " + why);
+        return false;
+    }
+    private static String message(Exception e) { return e.getMessage() == null ? e.toString() : e.getMessage(); }
+    private String summary() {
         return attacks + " attacks and " + upgraded + " verified wall upgrades."
                 + (wallSkips == 0 ? "" : " Walls skipped " + wallSkips + "× (last: " + wallSkipReason + ").");
     }

@@ -40,7 +40,7 @@ public final class MainActivity extends Activity {
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom); return insets;
         });
         setContentView(scroll);
-        text("DRAGON FARMER", 12, Color.rgb(42, 111, 88));
+        text("DRAGON FARMER  " + BuildConfig.VERSION_NAME, 12, Color.rgb(42, 111, 88));
         text("Your farming controls", 28, Color.rgb(24, 44, 36));
         text("TH18 · Dragons · Gold + elixir walls", 15, Color.DKGRAY);
         text("Standalone device-test build. No internet permission; captures and settings stay on this phone. Includes bundled Google ML Kit OCR.", 13, Color.DKGRAY);
@@ -55,6 +55,7 @@ public final class MainActivity extends Activity {
         button("3   Army & farming settings", this::settingsMenu);
         button("4   Check recognition — no taps", () -> prepare(MacroService.DIAGNOSE));
         button("5   Test one attack + wall check", () -> prepare(MacroService.ONE_ATTACK));
+        button("6   Upgrade walls now — no attack", () -> prepare(MacroService.WALLS));
         button("Start farming session", () -> prepare(MacroService.FARM));
         if (service != null && service.busy()) button("STOP", () -> { service.stopWork("Stopped from app"); render(); });
         text("Keep Clash in English and landscape. Prepare your dragons and leave one builder free. Mark individual wall positions at a consistent zoom.", 13, Color.DKGRAY);
@@ -134,7 +135,29 @@ public final class MainActivity extends Activity {
             try { File f = new File(store.directory, name); if (f.exists()) report.append(name).append("\n").append(new String(Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8)).append("\n\n"); }
             catch (Exception e) { report.append(e.getMessage()); }
         }
+        String steps = recentWallSteps(new File(store.directory, "session.jsonl"), 15);
+        if (!steps.isEmpty()) report.append("Latest wall steps (newest last)\n").append(steps);
         alert("Last test results", report.length() == 0 ? "No device test has been run yet." : report.toString());
+    }
+    /** The last wall-related lines of the session log as "time  event: detail", so a skipped visit can be read on the phone. */
+    static String recentWallSteps(File log, int max) {
+        if (!log.exists()) return "";
+        Deque<String> lines = new ArrayDeque<>();
+        try {
+            for (String raw : Files.readAllLines(log.toPath(), java.nio.charset.StandardCharsets.UTF_8)) {
+                org.json.JSONObject line;
+                try { line = new org.json.JSONObject(raw); } catch (org.json.JSONException e) { continue; }
+                String event = line.optString("event"), time = line.optString("time");
+                if (!event.startsWith("wall") && !event.startsWith("batch") && !event.startsWith("price")
+                        && !event.equals("session-start") && !event.equals("session-summary") && !event.equals("complete") && !event.equals("error")) continue;
+                String[] parts = time.split(" ");
+                lines.addLast((parts.length > 3 ? parts[3] : time) + "  " + event + ": " + line.optString("detail"));
+                if (lines.size() > max) lines.removeFirst();
+            }
+        } catch (IOException e) { return "Session log unreadable: " + e.getMessage() + "\n"; }
+        StringBuilder out = new StringBuilder();
+        for (String line : lines) out.append(line).append('\n');
+        return out.toString();
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
