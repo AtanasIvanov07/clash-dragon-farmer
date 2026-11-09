@@ -25,7 +25,7 @@ public final class Stages {
     private static Field p(String k, String s) { return new Field("point", k, s); }
     private static Field ps(String k, String s) { return new Field("points", k, s); }
     /** Stages from this index on are only needed for wall upgrades. */
-    public static final int FIRST_WALL_STAGE = 7;
+    public static final int FIRST_WALL_STAGE = 8;
     public static final List<Stage> ALL = List.of(
         new Stage("Home village", "Open Home and close any panels. After CAPTURE the app zooms out exactly like it does after each battle, then takes the screenshot.", List.of(
             t("home", "Drag around the Attack button label, excluding scenery."),
@@ -53,6 +53,9 @@ public final class Stages {
             ot("hero_4", "FOURTH HERO card: drag inside the hero's face. Tap Save / next without a box to skip."),
             ot("rage", "RAGE SPELL card: drag inside the potion picture, excluding the count and level. Tap Save / next without a box to skip."),
             ops("rage_points", "RAGE drop points: tap a little INSIDE the base, in front of where your dragons enter. One spell per point. Tap Save / next without points to skip."))),
+        new Stage("Event P.E.K.K.A (optional)", "Only while the event P.E.K.K.A troop is in your army. Find a base like Opponent scouting and capture BEFORE deploying. Every P.E.K.K.A on the card is deployed right after the dragons, at the same deployment points.", List.of(
+            ot("pekka", "P.E.K.K.A card: drag inside the P.E.K.K.A picture. Exclude quantity, level and selection border. Tap Save / next without a box to stop deploying them."),
+            or("pekka_count", "Drag around the P.E.K.K.A quantity (for example x25) only. Include room for two digits; exclude other cards and troop level."))),
         new Stage("Live battle", "Manually deploy a dragon, then capture DURING battle.", List.of(
             t("battle", "Drag around a fixed battle label such as Surrender. Exclude the timer."))),
         new Stage("Battle result", "Finish that manual attack. Capture the result before going Home.", List.of(

@@ -363,7 +363,7 @@ public final class MacroService extends AccessibilityService {
                                 report.append(field.key).append(vision.match(f, field.key) == null ? ": not visible\n" : ": MATCH\n");
                             } else if (field.kind.equals("region") && store.rectangle("regions", field.key) != null) {
                                 String value = vision.read(f, field.key);
-                                Number parsed = field.key.equals("dragon_count") ? (Number) Rules.troopCount(value)
+                                Number parsed = field.key.endsWith("_count") ? (Number) Rules.troopCount(value)
                                         : field.key.equals("home_builders") ? (Number) Rules.freeBuilders(value) : Rules.number(value);
                                 report.append(field.key).append(": ").append(value).append(" → ").append(parsed)
                                         .append(field.key.equals("home_builders") ? " free builders\n" : "\n");
@@ -383,7 +383,7 @@ public final class MacroService extends AccessibilityService {
                 } else {
                     Farmer.Plan plan = plan(); if (mode == ONE_ATTACK) plan.maxAttacks = 1;
                     deadline = SystemClock.elapsedRealtime() + plan.maxMinutes * 60_000L;
-                    store.log("session-start", "native APK " + BuildConfig.VERSION_NAME + "; " + (mode == WALLS ? "walls only" : plan.maxAttacks + " attacks; " + plan.dragons + " dragons"));
+                    store.log("session-start", "native APK " + BuildConfig.VERSION_NAME + "; " + (mode == WALLS ? "walls only" : plan.maxAttacks + " attacks; " + plan.dragons + " dragons" + (plan.pekka ? " + event P.E.K.K.As" : "")));
                     Farmer farmer = new Farmer(port(vision), plan);
                     String summary = mode == WALLS ? farmer.wallsOnly() : farmer.run();
                     complete(token, summary, false);
@@ -404,6 +404,7 @@ public final class MacroService extends AccessibilityService {
         p.reserveGold = store.setting("reserveGold"); p.reserveElixir = store.setting("reserveElixir"); p.maxWallCost = store.setting("maxWallCost");
         p.wallsPerVisit = (int) store.setting("maxWallsPerVisit"); p.targetWallLevel = (int) store.setting("targetWallLevel"); p.wallsEnabled = store.wallsEnabled();
         p.deployments = store.points("deploy"); p.walls = store.points("walls");
+        p.pekka = store.hasTemplate("pekka") && Rules.rect(store.rectangle("regions", "pekka_count"), store.width(), store.height());
         for (String card : Stages.EXTRA_CARDS) if (store.hasTemplate(card)) p.extras.add(card);
         p.abilitySeconds = (int) store.setting("heroAbilitySeconds");
         p.rage = store.hasTemplate("rage"); p.ragePoints = store.points("rage_points"); p.rageSeconds = (int) store.setting("rageSeconds");

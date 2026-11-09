@@ -61,6 +61,11 @@ public final class Farmer {
         public int dragons = 18, maxAttacks = 30, maxMinutes = 90, maxSkips = 40, wallsPerVisit = 2, targetWallLevel = 0;
         public boolean wallsEnabled = true;
         public List<int[]> deployments = new ArrayList<>(), walls = new ArrayList<>();
+        /**
+         * The event P.E.K.K.A card and its counter are calibrated: every P.E.K.K.A on the card goes
+         * out right after the dragons, counted the same way. An army without the card attacks as before.
+         */
+        public boolean pekka;
         /** Calibrated siege/hero cards, deployed after the dragons in this order. */
         public List<String> extras = new ArrayList<>();
         /** Seconds after the heroes land before their abilities are tapped. */
@@ -87,6 +92,8 @@ public final class Farmer {
     private final Port io;
     private final Plan plan;
     private int attacks, upgraded, wallSkips;
+    /** The next marked deployment point, carried from the dragons to the P.E.K.K.As and the siege and heroes. */
+    private int deployIndex;
     private String wallSkipReason;
     /** The last walls outcome. It stays on the floating control, under the current step, until walls are checked again. */
     private String wallNote;
@@ -505,60 +512,49 @@ public final class Farmer {
             io.tap("scout", "scout"); io.pause(1000); waitFor("scout", 60);
         }
         if (!accepted) throw new IllegalStateException("Maximum skipped bases reached without enough loot.");
-        // Two matching reads in a row; a single OCR miss only costs another read.
-        Integer remaining = null, previous = null;
-        for (int read = 0; read < 4 && remaining == null; read++) {
-            if (read > 0) io.pause(300);
-            Integer count;
-            try (Screen f = io.capture()) { require(f, "scout"); count = Rules.troopCount(io.read(f, "dragon_count")); }
-            if (count != null && count.equals(previous)) remaining = count;
-            previous = count;
-        }
+        Integer remaining = troopCount("dragon_count");
         if (remaining == null || remaining < plan.dragons) throw new IllegalStateException("Dragon count is unreadable, changing, or below your configured army size.");
-        // Remember where the siege, hero and rage cards sit while nothing is selected. When a troop
-        // runs out Clash auto-selects the next card, which lifts and outlines it so it no longer
+        // Remember where the P.E.K.K.A, siege, hero and rage cards sit while nothing is selected. When
+        // a troop runs out Clash auto-selects the next card, which lifts and outlines it so it no longer
         // matches its picture; the troop bar itself does not move during the battle.
         Map<String, int[]> cards = new LinkedHashMap<>();
+        int[] pekkaCard = null;
         try (Screen f = io.capture()) {
             require(f, "scout");
+            if (plan.pekka) pekkaCard = io.find(f, "pekka");
             for (String card : plan.extras) { int[] at = io.find(f, card); if (at != null) cards.put(card, at); }
             if (plan.rage) { int[] at = io.find(f, "rage"); if (at != null) cards.put("rage", at); }
         }
         io.log("army-cards", cards.isEmpty() ? "no siege, hero or rage card found" : String.join(", ", cards.keySet()));
-        io.tap("dragon", "scout", "dragon"); io.pause(150);
-        // Fast deployment: one tap per dragon still to place, sent back to back, then a
-        // single verified count. Taps on forbidden ground place nothing, so the next burst
-        // uses the following points. A burst can never place more dragons than it taps.
-        int target = remaining - plan.dragons, next = 0, emptyTaps = 0;
-        boolean verified = true;
-        while (remaining > target) {
-            List<int[]> burst = new ArrayList<>();
-            for (int i = remaining - target; i > 0; i--) burst.add(plan.deployments.get(next++ % plan.deployments.size()));
-            status("Deploying " + burst.size() + " dragons");
-            int sent = io.burst(burst, "scout", "battle");
-            io.pause(400);
-            Integer left = dragonsLeft(remaining, target);
-            if (left == null) {
-                // A depleted card is greyed and its "x0" is often unreadable. Never tap more
-                // dragons without a verified count, but let the battle and the heroes go on.
-                io.log("deploy-unverified", "dragon count unreadable after " + sent + " taps; no further dragon taps");
-                verified = false;
-                break;
-            }
-            if (left < 0) break; // battle already over
-            io.log("deploy-burst", sent + " taps, " + (remaining - left) + " placed, " + (left - target) + " to go");
-            // Give up only once every marked point was tapped in a row without placing a dragon.
-            emptyTaps = left < remaining ? 0 : emptyTaps + burst.size();
-            remaining = left;
-            if (remaining > target && emptyTaps >= plan.deployments.size()) throw new IllegalStateException("No marked deployment point placed a dragon. Recalibrate outer-edge points.");
+        // The event P.E.K.K.A card: every one on it goes out after the dragons. A missing card or an
+        // unreadable count only leaves the P.E.K.K.As at home; the dragons attack as before.
+        Integer pekkas = null;
+        if (plan.pekka) {
+            if (pekkaCard != null) pekkas = troopCount("pekka_count");
+            io.log("pekka-card", pekkaCard == null ? "not in this army" : pekkas == null ? "count unreadable; P.E.K.K.As stay home" : pekkas + " on the card");
         }
-        io.log("deployed", verified ? plan.dragons - (remaining - target) + " dragons" : "dragons sent, last count unreadable (greyed card)");
+        io.tap("dragon", "scout", "dragon"); io.pause(150);
+        deployIndex = 0;
+        boolean over = deployCounted("dragon", "dragons", "dragon_count", remaining, remaining - plan.dragons, "scout", "battle");
+        if (!over && pekkas != null && pekkas > 0) {
+            // A selected card hides the battle button's match; cards still waiting prove the battle screen.
+            List<String> guards = new ArrayList<>(List.of("battle", "scout")); guards.addAll(cards.keySet());
+            String[] guard = guards.toArray(new String[0]);
+            try {
+                io.burst(List.of(pekkaCard), guard); io.pause(150);
+                over = deployCounted("P.E.K.K.A", "P.E.K.K.As", "pekka_count", pekkas, 0, guard);
+            } catch (java.io.IOException | IllegalStateException e) {
+                // The P.E.K.K.As failing must not abandon an attack already under way.
+                io.log("pekka-skipped", e.getMessage());
+            }
+        }
         // Siege machine, then heroes: select the card at its recorded spot, tap the next point
         // along the same edge. A deployed hero's card turns into its ability button there.
         Map<String, int[]> abilities = new LinkedHashMap<>();
         for (String card : plan.extras) {
             int[] at = cards.get(card);
             if (at == null) { io.log("extra-skipped", card + " not in this army"); continue; }
+            if (over) break;
             try (Screen f = io.capture()) { if (io.has(f, "result")) break; }
             status("Deploying " + card.replace('_', ' '));
             // A selected card hides the battle button's match. Cards still waiting in the
@@ -568,7 +564,7 @@ public final class Farmer {
             String[] guard = guards.toArray(new String[0]);
             try {
                 io.burst(List.of(at), guard); io.pause(150);
-                io.burst(List.of(plan.deployments.get(next++ % plan.deployments.size())), guard);
+                io.burst(List.of(plan.deployments.get(deployIndex++ % plan.deployments.size())), guard);
             } catch (java.io.IOException | IllegalStateException e) {
                 // One card failing must not abandon an attack already under way.
                 io.log("extra-skipped", card + ": " + e.getMessage()); continue;
@@ -614,8 +610,54 @@ public final class Farmer {
             }
         }
     }
-    /** Dragons still in the card, from two agreeing reads within [target, remaining]; -1 once the battle result shows; null if unreadable. */
-    private Integer dragonsLeft(int remaining, int target) throws Exception {
+    /** A troop counter on the scouting screen: two matching reads in a row; a single OCR miss only costs another read. */
+    private Integer troopCount(String counter) throws Exception {
+        Integer previous = null;
+        for (int read = 0; read < 4; read++) {
+            if (read > 0) io.pause(300);
+            Integer count;
+            try (Screen f = io.capture()) { require(f, "scout"); count = Rules.troopCount(io.read(f, counter)); }
+            if (count != null && count.equals(previous)) return count;
+            previous = count;
+        }
+        return null;
+    }
+    /**
+     * Deploys the selected troop card until its counter shows {@code target}. Fast deployment: one tap
+     * per troop still to place, sent back to back, then a single verified count. Taps on forbidden
+     * ground place nothing, so the next burst uses the following points. A burst can never place more
+     * troops than it taps, so the next card (which Clash selects once this one runs out) is never tapped
+     * out by mistake. Returns true once the battle is over.
+     */
+    private boolean deployCounted(String one, String many, String counter, int remaining, int target, String... guards) throws Exception {
+        int start = remaining, emptyTaps = 0;
+        boolean verified = true, over = false;
+        while (remaining > target) {
+            List<int[]> burst = new ArrayList<>();
+            for (int i = remaining - target; i > 0; i--) burst.add(plan.deployments.get(deployIndex++ % plan.deployments.size()));
+            status("Deploying " + burst.size() + " " + many);
+            int sent = io.burst(burst, guards);
+            io.pause(400);
+            Integer left = troopsLeft(counter, remaining, target);
+            if (left == null) {
+                // A depleted card is greyed and its "x0" is often unreadable. Never tap more
+                // troops without a verified count, but let the battle and the heroes go on.
+                io.log("deploy-unverified", one + " count unreadable after " + sent + " taps; no further " + one + " taps");
+                verified = false;
+                break;
+            }
+            if (left < 0) { over = true; break; } // battle already over
+            io.log("deploy-burst", many + ": " + sent + " taps, " + (remaining - left) + " placed, " + (left - target) + " to go");
+            // Give up only once every marked point was tapped in a row without placing a troop.
+            emptyTaps = left < remaining ? 0 : emptyTaps + burst.size();
+            remaining = left;
+            if (remaining > target && emptyTaps >= plan.deployments.size()) throw new IllegalStateException("No marked deployment point placed a " + one + ". Recalibrate outer-edge points.");
+        }
+        io.log("deployed", verified ? (start - remaining) + " " + many : many + " sent, last count unreadable (greyed card)");
+        return over;
+    }
+    /** Troops still in the card, from two agreeing reads within [target, remaining]; -1 once the battle result shows; null if unreadable. */
+    private Integer troopsLeft(String counter, int remaining, int target) throws Exception {
         Integer previous = null;
         int unknown = 0;
         for (int read = 0; read < 5; read++) {
@@ -629,7 +671,7 @@ public final class Farmer {
                     if (++unknown == 5) throw new IllegalStateException("Unknown screen during deployment.");
                     previous = null; continue;
                 }
-                n = Rules.troopCount(io.read(f, "dragon_count"));
+                n = Rules.troopCount(io.read(f, counter));
             }
             if (n != null && (n < target || n > remaining)) n = null;
             if (n != null && n.equals(previous)) return n;

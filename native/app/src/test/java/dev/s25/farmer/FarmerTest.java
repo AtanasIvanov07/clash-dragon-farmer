@@ -40,6 +40,8 @@ public class FarmerTest {
         Set<String> unreadablePrices = new HashSet<>();
         List<String> cardTaps = new ArrayList<>();
         boolean autoSelect; String lifted;
+        /** Event P.E.K.K.As in the army (0: no card), how many went out, and how often their count is unreadable. */
+        int pekkas, pekkasDeployed; boolean pekkaCountUnreadable;
         int batchCount, wallsLeft = 1000;
         static long unitPrice(String resource) { return resource.equals("gold") ? 2_000_000 : 3_000_000; }
         @Override public Integer wallCount(Farmer.Screen f) { return ((Screen) f).state.equals("batch") && !titleUnreadable ? batchCount : null; }
@@ -59,9 +61,9 @@ public class FarmerTest {
             if (battleEnd > 0 && time >= battleEnd && state.equals("battle")) { state = "result"; battleEnd = 0; }
             return new Screen(state);
         }
-        // Card spots in the troop bar: x 600 + index (rage at 599), y 900.
-        @Override public int[] find(Farmer.Screen f, String k) { return has(f, k) ? new int[] {600 + Stages.EXTRA_CARDS.indexOf(k), 900} : null; }
-        static String cardAt(int[] p) { return p[0] == 599 ? "rage" : Stages.EXTRA_CARDS.get(p[0] - 600); }
+        // Card spots in the troop bar: x 600 + index (rage at 599, P.E.K.K.A at 598), y 900.
+        @Override public int[] find(Farmer.Screen f, String k) { return has(f, k) ? new int[] {k.equals("pekka") ? 598 : 600 + Stages.EXTRA_CARDS.indexOf(k), 900} : null; }
+        static String cardAt(int[] p) { return p[0] == 598 ? "pekka" : p[0] == 599 ? "rage" : Stages.EXTRA_CARDS.get(p[0] - 600); }
         @Override public List<int[]> walls(Farmer.Screen f) {
             // Only walls still at the picked level look like the picked ones.
             List<int[]> out = new ArrayList<>();
@@ -84,6 +86,7 @@ public class FarmerTest {
                 case "scout", "dragon" -> s.equals("scout");
                 case "siege", "hero_1", "hero_2" -> armyExtras.contains(k) && !extrasDeployed.contains(k) && !k.equals(lifted) && (s.equals("scout") || s.equals("battle"));
                 case "rage" -> rageInArmy && !rageCast && (s.equals("scout") || s.equals("battle"));
+                case "pekka" -> pekkas > 0 && pekkasDeployed < pekkas && !k.equals(lifted) && (s.equals("scout") || s.equals("battle"));
                 case "battle" -> s.equals("battle");
                 case "result" -> s.equals("result");
                 case "wall_gold", "wall_elixir" -> s.equals("selected") && !noUpgradeButtons;
@@ -150,7 +153,7 @@ public class FarmerTest {
             if (points.size() == 1 && points.get(0)[1] == 900) {
                 // Tapping a card in the troop bar selects it, even while the game has it lifted.
                 String card = cardAt(points.get(0));
-                if (card.equals("rage") ? !rageInArmy : !armyExtras.contains(card)) throw new IllegalStateException("No such card " + card);
+                if (card.equals("rage") ? !rageInArmy : card.equals("pekka") ? pekkas == 0 : !armyExtras.contains(card)) throw new IllegalStateException("No such card " + card);
                 selected = card; cardTaps.add(card); return 1;
             }
             bursts++; int sent = 0;
@@ -163,16 +166,23 @@ public class FarmerTest {
                 if (casting) { rageDrops.add(time); continue; }
                 lastDeployed = time;
                 if (this.p.extras.contains(selected)) { if (selected.startsWith("hero_")) heroLanded = time; extrasDeployed.add(selected); selected = null; }
+                else if ("pekka".equals(selected)) {
+                    if (rejectedDeployments > 0) { rejectedDeployments--; continue; }
+                    // A tap after the card ran out would place the next card: the farmer must never send one.
+                    if (pekkasDeployed == pekkas) throw new IllegalStateException("Tapped past the last P.E.K.K.A");
+                    pekkasDeployed++; order.add("pekka");
+                    if (autoSelect && pekkasDeployed == pekkas) lifted = "siege";
+                }
                 else {
                     if (rejectedDeployments > 0) { rejectedDeployments--; continue; }
                     if (rejectSecond && dragons == 1 && !secondRejected) { secondRejected=true; continue; }
                     dragons++; totalDeployed++; order.add("dragon");
                     // Like Clash: when the dragons run out, the next card is selected and lifted.
-                    if (autoSelect && dragons == this.p.dragons) lifted = "siege";
+                    if (autoSelect && dragons == this.p.dragons) lifted = pekkas > 0 ? "pekka" : "siege";
                 }
                 if (selected == null) order.add(extrasDeployed.get(extrasDeployed.size() - 1));
                 boolean extrasDone = this.p.extras.stream().filter(armyExtras::contains).allMatch(extrasDeployed::contains);
-                boolean over = dragons == this.p.dragons && extrasDone;
+                boolean over = dragons == this.p.dragons && extrasDone && (!this.p.pekka || pekkaCountUnreadable || pekkasDeployed == pekkas);
                 if (over && battleLength > 0) { if (battleEnd == 0) battleEnd = time + battleLength; over = false; }
                 state = over ? "result" : "battle";
             }
@@ -188,6 +198,7 @@ public class FarmerTest {
                 if (greyEmptyCard && dragons == p.dragons) return "";
             }
             if (key.equals("home_builders")) return builders;
+            if (key.equals("pekka_count")) return pekkaCountUnreadable ? "" : "x" + (pekkas - pekkasDeployed);
             if (key.equals("dragon_count")) {
                 return "x" + ((insufficientArmy ? 1 : p.dragons) - dragons);
             }
@@ -606,6 +617,35 @@ public class FarmerTest {
     @Test public void everyPointCoveredStopsWithoutDeploying() {
         Sim s = new Sim(); s.p.deployments = List.of(new int[]{30,300}); s.blockedX = 30;
         assertThrows(IllegalStateException.class, s::run); assertEquals(0, s.totalDeployed);
+    }
+    private static List<String> times(int n, String troop) { return Collections.nCopies(n, troop); }
+    @Test public void eventPekkasFollowTheDragonsBeforeSiegeAndHeroes() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 18; s.p.wallsEnabled = false; s.p.extras = List.of("siege", "hero_1"); s.p.pekka = true; s.pekkas = 25;
+        s.p.deployments = List.of(new int[]{10,300}, new int[]{20,300}, new int[]{40,300});
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run());
+        List<String> expected = new ArrayList<>(times(18, "dragon")); expected.addAll(times(25, "pekka")); expected.addAll(List.of("siege", "hero_1"));
+        assertEquals(expected, s.order); assertEquals(18, s.totalDeployed); assertEquals(2, s.bursts - 2);
+        assertTrue(s.cardTaps.contains("pekka"));
+    }
+    @Test public void pekkasDeployWhenTheGameAutoSelectsTheirCard() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("siege", "hero_1"); s.p.pekka = true; s.pekkas = 25; s.autoSelect = true;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(25, s.pekkasDeployed);
+    }
+    @Test public void rejectedPekkaTapsAreRetried() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.pekka = true; s.pekkas = 25; s.blockedX = 20;
+        s.p.deployments = List.of(new int[]{10,300}, new int[]{20,300}, new int[]{40,300});
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(25, s.pekkasDeployed); assertEquals(3, s.totalDeployed);
+    }
+    @Test public void armyWithoutThePekkaCardAttacksWithDragons() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("hero_1"); s.p.pekka = true; s.pekkas = 0;
+        s.run(); assertEquals(List.of("dragon", "dragon", "dragon", "hero_1"), s.order);
+        assertTrue(s.events.contains("pekka-card: not in this army"));
+    }
+    @Test public void unreadablePekkaCountLeavesThemHome() throws Exception {
+        Sim s = new Sim(); s.p.dragons = 3; s.p.wallsEnabled = false; s.p.extras = List.of("hero_1"); s.p.pekka = true; s.pekkas = 25; s.pekkaCountUnreadable = true;
+        s.battleLength = 30_000;
+        assertEquals("1 attacks and 0 verified wall upgrades.", s.run()); assertEquals(0, s.pekkasDeployed);
+        assertEquals(List.of("dragon", "dragon", "dragon", "hero_1"), s.order);
     }
     @Test public void insufficientArmyStopsBeforeSelectingTroops() {
         Sim s = new Sim(); s.insufficientArmy = true; assertThrows(IllegalStateException.class,s::run); assertFalse(s.taps.contains("dragon"));

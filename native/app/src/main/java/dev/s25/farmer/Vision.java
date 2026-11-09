@@ -15,7 +15,9 @@ public final class Vision implements AutoCloseable {
     private final TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     private final Map<String, Template> templates = new HashMap<>();
     private boolean warmed;
-    private int dragonShift, unreadableShots;
+    private int unreadableShots;
+    /** How far each counted troop card (dragon, P.E.K.K.A) slid from its calibrated spot when last seen. */
+    private final Map<String, Integer> cardShift = new HashMap<>();
     private List<Template> wallPieces;
     /** Pieces the app cut itself from walls it upgraded, by their new level (see {@link #learnWall}). */
     private TreeMap<Integer, List<Template>> learned;
@@ -107,14 +109,14 @@ public final class Vision implements AutoCloseable {
         int tolerance = key.equals("home_anchor") ? 1 : tolerance(f);
         // Clash centers the troop bar, so cards slide sideways when the army has more
         // or fewer cards (Clan Castle troops, spells, sieges).
-        boolean troopBar = key.equals("dragon") || key.equals("rage") || Stages.EXTRA_CARDS.contains(key);
+        boolean troopBar = key.equals("dragon") || key.equals("pekka") || key.equals("rage") || Stages.EXTRA_CARDS.contains(key);
         int minX = troopBar ? 0 : Math.max(0, r[0] - tolerance), maxX = troopBar ? f.width() - t.w : Math.min(f.width() - t.w, r[0] + tolerance);
         int minY = Math.max(0, r[1] - tolerance), maxY = Math.min(f.height() - t.h, r[1] + tolerance);
         int[] rows = steadyRows(key, t);
         int[] at = best(f, t, minX, maxX, minY, maxY, 1, rows[0], rows[1], 0.94, 22);
         if (at == null) at = withoutBackground(f, key, t, minX, maxX, minY, maxY);
         if (at == null) return null;
-        if (key.equals("dragon")) dragonShift = at[0] - r[0];
+        if (key.equals("dragon") || key.equals("pekka")) cardShift.put(key, at[0] - r[0]);
         return new int[] {at[0] + t.w / 2, at[1] + t.h / 2};
     }
     /**
@@ -166,7 +168,7 @@ public final class Vision implements AutoCloseable {
         else store.log("siege-found", "by " + how + " at " + Arrays.toString(at));
         return at;
     }
-    /** The card left of the leftmost hero, spaced like the calibrated siege and first hero; null if that is the dragon card. */
+    /** The card left of the leftmost hero, spaced like the calibrated siege and first hero; null if that is the dragon or P.E.K.K.A card. */
     private int[] besideHeroes(Frame f) throws IOException {
         int[] siege = store.rectangle("templates", "siege"), first = store.rectangle("templates", "hero_1");
         if (!Rules.rect(siege, f.width(), f.height()) || !Rules.rect(first, f.width(), f.height())) return null;
@@ -178,8 +180,12 @@ public final class Vision implements AutoCloseable {
         }
         if (left == null) return null;
         int x = left - (first[0] + first[2] / 2 - (siege[0] + siege[2] / 2));
-        int[] dragon = match(f, "dragon");
-        if (x < 0 || dragon != null && Math.abs(dragon[0] - x) < siege[2] / 2) return null;
+        if (x < 0) return null;
+        for (String troop : List.of("dragon", "pekka")) {
+            if (!Rules.rect(store.rectangle("templates", troop), f.width(), f.height())) continue;
+            int[] card = match(f, troop);
+            if (card != null && Math.abs(card[0] - x) < siege[2] / 2) return null;
+        }
         return new int[] {x, siege[1] + siege[3] / 2};
     }
     /** {x, y, score × 1000} of the best placement scoring at least {@code threshold}, sampling template rows [fromRow, toRow). */
@@ -382,14 +388,15 @@ public final class Vision implements AutoCloseable {
     }
     public String read(Frame frame, String key) throws Exception {
         int[] r = store.rectangle("regions", key);
-        boolean counter = key.equals("dragon_count");
+        boolean counter = key.equals("dragon_count") || key.equals("pekka_count");
         if (counter && r != null && r.length == 4) {
             // The counter moves with its card. A selected card is lifted and enlarged and
             // a depleted one is dimmed; neither matches, so keep the last seen position.
             // The read area grows a little to cover the lift; the card's white selection
             // border touches the area's edge and is dropped by the mask.
-            match(frame, "dragon");
-            int gx = r[2] / 8, top = Math.max(0, r[1] - r[3] / 4), left = Math.max(0, r[0] + dragonShift - gx);
+            String card = key.substring(0, key.indexOf('_'));
+            match(frame, card);
+            int gx = r[2] / 8, top = Math.max(0, r[1] - r[3] / 4), left = Math.max(0, r[0] + cardShift.getOrDefault(card, 0) - gx);
             r = new int[] {left, top, Math.min(frame.width() - left, r[2] + 2 * gx), Math.min(frame.height() - top, r[1] + r[3] + r[3] / 8 - top)};
         }
         boolean loot = key.startsWith("loot_"), cost = key.endsWith("_cost"), confirm = cost && key.startsWith("confirm_");
